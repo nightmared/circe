@@ -5,4 +5,10 @@ edition = "2018"
 resolver = "2"
 
 [dependencies]
-nftnl = "0.6.1"
+nftnl = { path = "nftnl/nftnl" }
+lazy_static = "1.4.0"
+thiserror = "1.0"
+mnl = "0.2.0"
+libc = "0.2"
+tracing = "0.1"
+tracing-subscriber = "0.2"

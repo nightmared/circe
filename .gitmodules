@@ -1,0 +1,3 @@
+[submodule "nftnl"]
+	path = nftnl
+	url = git@github.com:nightmared/nftnl-rs.git
