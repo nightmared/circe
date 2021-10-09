@@ -5,7 +5,7 @@ edition = "2018"
 resolver = "2"
 
 [dependencies]
-nftnl = { path = "nftnl/nftnl" }
+nftnl = { path = "nftnl/nftnl", features = [ "query" ] }
 lazy_static = "1.4.0"
 thiserror = "1.0"
 mnl = "0.2.0"
