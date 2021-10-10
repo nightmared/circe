@@ -1,13 +1,6 @@
-// heavily "inspired" from https://raw.githubusercontent.com/mullvad/mullvadvpn-app/d92376b4d1df9b547930c68aa9bae9640ff2a022/talpid-core/src/firewall/linux.rs
-use nftnl::{
-    nftnl_sys::{NFTNL_RULE_CHAIN, NFTNL_RULE_FAMILY, NFTNL_RULE_TABLE},
-    query::list_objects_with_data,
-    Chain, ProtoFamily, Rule, Table,
-};
-use std::{
-    convert::TryFrom,
-    ffi::{CStr, CString},
-};
+// "inspired" from https://raw.githubusercontent.com/mullvad/mullvadvpn-app/d92376b4d1df9b547930c68aa9bae9640ff2a022/talpid-core/src/firewall/linux.rs
+use nftnl::{list_chains_for_table, list_rules_for_chain, list_tables, Chain, Rule, Table};
+use std::{ffi::CString, fmt::Debug, sync::Arc};
 use tracing::error;
 
 #[derive(thiserror::Error, Debug)]
@@ -15,8 +8,8 @@ pub enum Error {
     #[error("Query error")]
     QueryError(#[from] nftnl::query::Error),
 
-    #[error("Couldn't allocate a netlink object, out of memory ?")]
-    NetlinkAllocationFailed,
+    #[error("The target obejct already exists")]
+    AlreadyExistsError,
 }
 
 lazy_static::lazy_static! {
@@ -27,158 +20,132 @@ lazy_static::lazy_static! {
     static ref NAT_CHAIN_NAME: CString = CString::new("nat").unwrap();
 }
 
-pub fn get_tables_cb(
-    header: &libc::nlmsghdr,
-    (_, tables): &mut (&(), &mut Vec<Table>),
-) -> libc::c_int {
-    unsafe {
-        let table = nftnl::nftnl_sys::nftnl_table_alloc();
-        if table as usize == 0 {
-            return mnl::mnl_sys::MNL_CB_ERROR;
+#[derive(Debug)]
+struct VirtualRuleset {
+    tables: Vec<VirtualTable>,
+}
+
+impl VirtualRuleset {
+    fn new() -> Result<Self, Error> {
+        let nf_tables: Vec<Arc<Table>> = list_tables()?.into_iter().map(Arc::new).collect();
+
+        let mut tables = Vec::with_capacity(nf_tables.len());
+        for nf_table in nf_tables {
+            tables.push(VirtualTable::new(nf_table)?);
         }
-        let err = nftnl::nftnl_sys::nftnl_table_nlmsg_parse(header, table);
-        if err < 0 {
-            error!("Failed to parse nelink table message - {}", err);
-            nftnl::nftnl_sys::nftnl_table_free(table);
-            return err;
+
+        Ok(VirtualRuleset { tables })
+    }
+
+    fn add_table(&mut self, table: Arc<Table>) -> Result<(), Error> {
+        for cur_table in &self.tables {
+            if cur_table.table == table {
+                return Err(Error::AlreadyExistsError);
+            }
         }
-        let family = nftnl::nftnl_sys::nftnl_table_get_u32(
+        self.tables.push(VirtualTable {
             table,
-            nftnl::nftnl_sys::NFTNL_TABLE_FAMILY as u16,
-        );
-        match ProtoFamily::try_from(family as i32) {
-            Ok(family) => {
-                tables.push(Table::from_raw(table, family));
-                mnl::mnl_sys::MNL_CB_OK
-            }
-            Err(nftnl::InvalidProtocolFamily) => {
-                error!("The netlink table didn't have a valid protocol family !?");
-                nftnl::nftnl_sys::nftnl_table_free(table);
-                mnl::mnl_sys::MNL_CB_ERROR
-            }
-        }
+            chains: Vec::new(),
+            is_overlay: true,
+        });
+        Ok(())
     }
 }
 
-pub fn get_chains_cb<'a>(
-    header: &libc::nlmsghdr,
-    (table, chains): &mut (&'a Table, &mut Vec<Chain<'a>>),
-) -> libc::c_int {
-    unsafe {
-        let chain = nftnl::nftnl_sys::nftnl_chain_alloc();
-        if chain as usize == 0 {
-            return mnl::mnl_sys::MNL_CB_ERROR;
-        }
-        let err = nftnl::nftnl_sys::nftnl_chain_nlmsg_parse(header, chain);
-        if err < 0 {
-            error!("Failed to parse nelink chain message - {}", err);
-            nftnl::nftnl_sys::nftnl_chain_free(chain);
-            return err;
+#[derive(Debug)]
+struct VirtualTable {
+    pub table: Arc<Table>,
+    pub chains: Vec<VirtualChain>,
+    is_overlay: bool,
+}
+
+impl VirtualTable {
+    fn new(nf_table: Arc<Table>) -> Result<Self, Error> {
+        let nf_chains = list_chains_for_table(nf_table.clone())?;
+
+        let mut chains = Vec::with_capacity(nf_chains.len());
+        for chain in nf_chains {
+            chains.push(VirtualChain::new(Arc::new(chain))?);
         }
 
-        let table_name = CStr::from_ptr(nftnl::nftnl_sys::nftnl_chain_get_str(
+        Ok(VirtualTable {
+            table: nf_table,
+            chains,
+            is_overlay: false,
+        })
+    }
+
+    fn add_chain(&mut self, chain: Arc<Chain>) -> Result<(), Error> {
+        for cur_chain in &self.chains {
+            if cur_chain.chain == chain {
+                return Err(Error::AlreadyExistsError);
+            }
+        }
+        self.chains.push(VirtualChain {
             chain,
-            nftnl::nftnl_sys::NFTNL_CHAIN_TABLE as u16,
-        ));
-        let family: ProtoFamily = std::mem::transmute(nftnl::nftnl_sys::nftnl_chain_get_u32(
-            chain,
-            nftnl::nftnl_sys::NFTNL_CHAIN_FAMILY as u16,
-        ) as u16);
-
-        if table_name != table.get_name() {
-            nftnl::nftnl_sys::nftnl_chain_free(chain);
-            return mnl::mnl_sys::MNL_CB_OK;
-        }
-
-        if family != ProtoFamily::Unspec && family != table.get_family() {
-            nftnl::nftnl_sys::nftnl_chain_free(chain);
-            return mnl::mnl_sys::MNL_CB_OK;
-        }
-
-        chains.push(Chain::from_raw(chain, table));
+            rules: Vec::new(),
+            is_overlay: true,
+        });
+        Ok(())
     }
-    mnl::mnl_sys::MNL_CB_OK
 }
 
-pub fn get_rules_cb<'a>(
-    header: &libc::nlmsghdr,
-    (chain, rules): &mut (&'a Chain<'a>, &mut Vec<Rule<'a>>),
-) -> libc::c_int {
-    unsafe {
-        let rule = nftnl::nftnl_sys::nftnl_rule_alloc();
-        let err = nftnl::nftnl_sys::nftnl_rule_nlmsg_parse(header, rule);
-        if err < 0 {
-            error!("Failed to parse nelink rule message - {}", err);
-            nftnl::nftnl_sys::nftnl_rule_free(rule);
-            return err;
-        }
+#[derive(Debug)]
+struct VirtualChain {
+    pub chain: Arc<Chain>,
+    pub rules: Vec<VirtualRule>,
+    is_overlay: bool,
+}
 
-        rules.push(Rule::from_raw(rule, chain));
+impl VirtualChain {
+    fn new(nf_chain: Arc<Chain>) -> Result<Self, Error> {
+        Ok(VirtualChain {
+            chain: nf_chain.clone(),
+            rules: list_rules_for_chain(&nf_chain)?
+                .into_iter()
+                .map(|rule| VirtualRule {
+                    rule: Arc::new(rule),
+                    is_overlay: false,
+                })
+                .collect(),
+            is_overlay: false,
+        })
     }
-    mnl::mnl_sys::MNL_CB_OK
-}
 
-fn list_tables() -> Result<Vec<Table>, Error> {
-    list_objects_with_data(libc::NFT_MSG_GETTABLE as u16, get_tables_cb, &(), None)
-        .map_err(Error::from)
-}
-
-fn list_chains_for_table<'a>(table: &'a Table) -> Result<Vec<Chain<'a>>, Error> {
-    list_objects_with_data(libc::NFT_MSG_GETCHAIN as u16, get_chains_cb, &table, None)
-        .map_err(Error::from)
-}
-
-fn list_rules_for_chain<'a>(chain: &'a Chain<'a>) -> Result<Vec<Rule<'a>>, Error> {
-    list_objects_with_data(
-        libc::NFT_MSG_GETRULE as u16,
-        get_rules_cb,
-        &chain,
-        // only retrieve rules from the currently targetted chain
-        Some(&|hdr| unsafe {
-            let rule = nftnl::nftnl_sys::nftnl_rule_alloc();
-            if rule as usize == 0 {
-                return Err(nftnl::query::Error::InitError(Box::new(
-                    Error::NetlinkAllocationFailed,
-                )));
+    fn add_rule(&mut self, rule: Arc<Rule>) -> Result<(), Error> {
+        for cur_rule in &self.rules {
+            if cur_rule.rule == rule {
+                return Err(Error::AlreadyExistsError);
             }
+        }
+        self.rules.push(VirtualRule {
+            rule,
+            is_overlay: true,
+        });
+        Ok(())
+    }
+}
 
-            nftnl::nftnl_sys::nftnl_rule_set_str(
-                rule,
-                NFTNL_RULE_TABLE as u16,
-                chain.get_table().get_name().as_ptr(),
-            );
-            nftnl::nftnl_sys::nftnl_rule_set_u32(
-                rule,
-                NFTNL_RULE_FAMILY as u16,
-                chain.get_table().get_family() as u32,
-            );
-            nftnl::nftnl_sys::nftnl_rule_set_str(
-                rule,
-                NFTNL_RULE_CHAIN as u16,
-                chain.get_name().as_ptr(),
-            );
-
-            nftnl::nftnl_sys::nftnl_rule_nlmsg_build_payload(hdr, rule);
-
-            nftnl::nftnl_sys::nftnl_rule_free(rule);
-            Ok(())
-        }),
-    )
-    .map_err(Error::from)
+#[derive(Debug)]
+struct VirtualRule {
+    pub rule: Arc<Rule>,
+    is_overlay: bool,
 }
 
 fn main() -> Result<(), Error> {
     tracing_subscriber::fmt::init();
-    let tables = list_tables()?;
-    for table in tables {
-        let chains = list_chains_for_table(&table)?;
-        for chain in chains.iter() {
-            println!("chains: {:?}", chain);
-            let rules = list_rules_for_chain(&chain)?;
-            for rule in rules {
-                println!("{:?}", rule.get_str());
-            }
-        }
-    }
+    //let tables = list_tables()?;
+    //for table in tables {
+    //    let chains = list_chains_for_table(&table)?;
+    //    for chain in chains.iter() {
+    //        println!("chains: {:?}", chain);
+    //        let rules = list_rules_for_chain(&chain)?;
+    //        for rule in rules {
+    //            println!("{:?}", rule.get_str());
+    //        }
+    //    }
+    //}
+    let ruleset = VirtualRuleset::new()?;
+    println!("{:?}", ruleset);
     Ok(())
 }
