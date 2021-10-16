@@ -32,6 +32,7 @@ lazy_static::lazy_static! {
 fn main() -> Result<(), Error> {
     tracing_subscriber::fmt::init();
     let mut ruleset = VirtualRuleset::new(CString::new("GeneratedByCIRCE").unwrap())?;
+    println!("{:?}", ruleset);
     let table = ruleset
         .get_table(&FILTER_TABLE_NAME, nftnl::ProtoFamily::Inet)
         .unwrap();
@@ -41,7 +42,11 @@ fn main() -> Result<(), Error> {
     rule.add_expr(&Log);
     chain.add_rule(Arc::new(rule))?;
 
-    ruleset.write()?;
+    ruleset.apply_overlay()?;
+
+    std::thread::sleep_ms(5000);
+
+    ruleset.delete_overlay()?;
 
     //println!("{:?}", ruleset);
     Ok(())
