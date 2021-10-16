@@ -25,12 +25,12 @@ impl VirtualRuleset {
             tables: Vec::new(),
         };
 
-        res.sync()?;
+        res.reload_state_from_system()?;
 
         Ok(res)
     }
 
-    pub fn add_table(&mut self, table: Arc<Table>) -> Result<(), Error> {
+    pub fn add_table(&mut self, table: Arc<Table>) -> Result<&mut VirtualTable, Error> {
         for cur_table in &self.tables {
             if cur_table.table == table {
                 return Err(Error::AlreadyExistsError);
@@ -44,10 +44,11 @@ impl VirtualRuleset {
             is_overlay: true,
         });
 
-        Ok(())
+        let pos = self.tables.len() - 1;
+        Ok(&mut self.tables[pos])
     }
 
-    pub fn sync(&mut self) -> Result<(), Error> {
+    pub fn reload_state_from_system(&mut self) -> Result<(), Error> {
         let nf_tables: Vec<Arc<Table>> = list_tables()?.into_iter().map(Arc::new).collect();
         let nf_objects: Vec<Arc<Table>> = self.tables.iter().map(|x| x.table.clone()).collect();
 
@@ -68,11 +69,13 @@ impl VirtualRuleset {
         for idx in (0..self.tables.len()).rev() {
             if nf_objets_to_delete.contains(&self.tables[idx].table) {
                 self.tables.swap_remove(idx);
+            } else {
+                self.tables[idx].exists = true;
             }
         }
 
         for table in &mut self.tables {
-            table.sync(&self.userdata)?;
+            table.reload_state_from_system(&self.userdata)?;
         }
 
         Ok(())
@@ -99,12 +102,13 @@ impl VirtualRuleset {
             send_batch(&mut batch)?;
         }
 
-        self.sync()?;
+        self.reload_state_from_system()?;
 
         Ok(())
     }
 
     pub fn delete_overlay(&mut self) -> Result<(), Error> {
+        println!("{:?}", self);
         let mut batch = Batch::new();
 
         for table in &mut self.tables {
@@ -115,7 +119,7 @@ impl VirtualRuleset {
             send_batch(&mut batch)?;
         }
 
-        self.sync()?;
+        self.reload_state_from_system()?;
 
         Ok(())
     }
@@ -140,12 +144,12 @@ impl VirtualTable {
             is_overlay,
         };
 
-        res.sync(userdata)?;
+        res.reload_state_from_system(userdata)?;
 
         Ok(res)
     }
 
-    pub fn add_chain(&mut self, chain: Arc<Chain>) -> Result<(), Error> {
+    pub fn add_chain(&mut self, chain: Arc<Chain>) -> Result<&mut VirtualChain, Error> {
         for cur_chain in &self.chains {
             if cur_chain.chain == chain {
                 return Err(Error::AlreadyExistsError);
@@ -159,10 +163,11 @@ impl VirtualTable {
             is_overlay: true,
         });
 
-        Ok(())
+        let pos = self.chains.len() - 1;
+        Ok(&mut self.chains[pos])
     }
 
-    fn sync(&mut self, userdata: &CStr) -> Result<(), Error> {
+    fn reload_state_from_system(&mut self, userdata: &CStr) -> Result<(), Error> {
         let nf_chains: Vec<Arc<Chain>> = list_chains_for_table(self.table.clone())?
             .into_iter()
             .map(Arc::new)
@@ -186,11 +191,13 @@ impl VirtualTable {
         for idx in (0..self.chains.len()).rev() {
             if nf_objets_to_delete.contains(&self.chains[idx].chain) {
                 self.chains.swap_remove(idx);
+            } else {
+                self.chains[idx].exists = true;
             }
         }
 
         for chain in &mut self.chains {
-            chain.sync(userdata)?;
+            chain.reload_state_from_system(userdata)?;
         }
 
         Ok(())
@@ -208,6 +215,13 @@ impl VirtualTable {
     }
 
     fn apply_overlay(&mut self, batch: &mut Batch, userdata: &CStr) -> Result<(), Error> {
+        if self.is_overlay && !self.exists {
+            debug!("Creating a new table {:?}", self.table.get_str());
+            self.table.set_userdata(userdata);
+
+            batch.add(&self.table, nftnl::MsgType::Add);
+        }
+
         for chain in &mut self.chains {
             chain.apply_overlay(batch, userdata)?;
         }
@@ -247,12 +261,12 @@ impl VirtualChain {
             is_overlay,
         };
 
-        res.sync(userdata)?;
+        res.reload_state_from_system(userdata)?;
 
         Ok(res)
     }
 
-    pub fn add_rule(&mut self, rule: Arc<Rule>) -> Result<(), Error> {
+    pub fn add_rule(&mut self, rule: Arc<Rule>) -> Result<&mut VirtualRule, Error> {
         for cur_rule in &self.rules {
             if cur_rule.rule == rule {
                 return Err(Error::AlreadyExistsError);
@@ -265,7 +279,8 @@ impl VirtualChain {
             is_overlay: true,
         });
 
-        Ok(())
+        let pos = self.rules.len() - 1;
+        Ok(&mut self.rules[pos])
     }
 
     pub fn get_rule(&mut self, handle: u64) -> Option<&mut VirtualRule> {
@@ -279,7 +294,7 @@ impl VirtualChain {
         None
     }
 
-    fn sync(&mut self, userdata: &CStr) -> Result<(), Error> {
+    fn reload_state_from_system(&mut self, userdata: &CStr) -> Result<(), Error> {
         let nf_rules: Vec<Arc<Rule>> = list_rules_for_chain(&self.chain)?
             .into_iter()
             .map(Arc::new)
@@ -306,6 +321,8 @@ impl VirtualChain {
         for idx in (0..self.rules.len()).rev() {
             if nf_objets_to_delete.contains(&self.rules[idx].rule) {
                 self.rules.swap_remove(idx);
+            } else {
+                self.rules[idx].exists = true;
             }
         }
 
@@ -313,9 +330,17 @@ impl VirtualChain {
     }
 
     fn apply_overlay(&mut self, batch: &mut Batch, userdata: &CStr) -> Result<(), Error> {
+        if self.is_overlay && !self.exists {
+            debug!("Creating a new chain {:?}", self.chain.get_str());
+            self.chain.set_userdata(userdata);
+
+            batch.add(&self.chain, nftnl::MsgType::Add);
+        }
+
         for rule in &mut self.rules {
             rule.apply_overlay(batch, userdata)?;
         }
+
         Ok(())
     }
 

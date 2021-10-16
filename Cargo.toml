@@ -12,3 +12,4 @@ mnl = { path = "mnl/mnl", features = ["mnl-1-0-4"] }
 libc = "0.2"
 tracing = "0.1"
 tracing-subscriber = "0.2"
+toml = "0.5.8"

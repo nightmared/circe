@@ -4,7 +4,7 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use nftnl::expr::{Expression, Log};
-use nftnl::Rule;
+use nftnl::{Chain, Rule, Table};
 use tracing::error;
 
 mod ruleset;
@@ -32,11 +32,20 @@ lazy_static::lazy_static! {
 fn main() -> Result<(), Error> {
     tracing_subscriber::fmt::init();
     let mut ruleset = VirtualRuleset::new(CString::new("GeneratedByCIRCE").unwrap())?;
-    println!("{:?}", ruleset);
-    let table = ruleset
-        .get_table(&FILTER_TABLE_NAME, nftnl::ProtoFamily::Inet)
-        .unwrap();
-    let chain = table.get_chain(&IN_CHAIN_NAME).unwrap();
+    let table = match ruleset.get_table(&NAT_TABLE_NAME, nftnl::ProtoFamily::Inet) {
+        Some(v) => v,
+        None => ruleset.add_table(Arc::new(Table::new(
+            &NAT_TABLE_NAME.as_ref(),
+            nftnl::ProtoFamily::Inet,
+        )))?,
+    };
+    let chain = match table.get_chain(&IN_CHAIN_NAME) {
+        Some(v) => v,
+        None => table.add_chain(Arc::new(Chain::new(
+            &IN_CHAIN_NAME.as_ref(),
+            table.table.clone(),
+        )))?,
+    };
 
     let mut rule = Rule::new(chain.chain.clone());
     rule.add_expr(&Log);
