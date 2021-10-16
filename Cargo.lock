@@ -47,7 +47,7 @@ version = "0.1.0"
 dependencies = [
  "lazy_static",
  "libc",
- "mnl",
+ "mnl 0.2.0",
  "nftnl",
  "thiserror",
  "tracing",
@@ -93,12 +93,29 @@ dependencies = [
 [[package]]
 name = "mnl"
 version = "0.2.0"
+dependencies = [
+ "libc",
+ "mnl-sys 0.2.0",
+ "tracing",
+]
+
+[[package]]
+name = "mnl"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6efb50a48dbacd112e7e847b9847fa530ec4a473ba6322a2f82c42ef333e226"
 dependencies = [
  "libc",
  "log",
- "mnl-sys",
+ "mnl-sys 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "mnl-sys"
+version = "0.2.0"
+dependencies = [
+ "libc",
+ "pkg-config",
 ]
 
 [[package]]
@@ -116,10 +133,10 @@ name = "nftnl"
 version = "0.7.0"
 dependencies = [
  "bitflags",
- "log",
- "mnl",
+ "mnl 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "nftnl-sys",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]

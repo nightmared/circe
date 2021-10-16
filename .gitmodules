@@ -1,3 +1,6 @@
 [submodule "nftnl"]
 	path = nftnl
 	url = git@github.com:nightmared/nftnl-rs.git
+[submodule "mnl"]
+	path = mnl
+	url = git@github.com:nightmared/mnl-rs.git
