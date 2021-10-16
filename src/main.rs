@@ -4,7 +4,7 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use nftnl::expr::{Expression, Log};
-use nftnl::{Chain, Rule, Table};
+use nftnl::{Chain, ProtoFamily, Rule, Table};
 use tracing::error;
 
 mod ruleset;
@@ -29,27 +29,48 @@ lazy_static::lazy_static! {
     static ref NAT_CHAIN_NAME: CString = CString::new("nat").unwrap();
 }
 
-fn main() -> Result<(), Error> {
-    tracing_subscriber::fmt::init();
-    let mut ruleset = VirtualRuleset::new(CString::new("GeneratedByCIRCE").unwrap())?;
-    let table = match ruleset.get_table(&NAT_TABLE_NAME, nftnl::ProtoFamily::Inet) {
+fn get_or_create_rule(
+    ruleset: &mut VirtualRuleset,
+    family: ProtoFamily,
+    table_name: impl AsRef<CStr>,
+    chain_name: impl AsRef<CStr>,
+    cb: impl Fn(&mut Rule) -> Result<(), Error>,
+) -> Result<(), Error> {
+    let table = match ruleset.get_table(table_name.as_ref(), family) {
         Some(v) => v,
-        None => ruleset.add_table(Arc::new(Table::new(
-            &NAT_TABLE_NAME.as_ref(),
-            nftnl::ProtoFamily::Inet,
-        )))?,
+        None => ruleset.add_table(Arc::new(Table::new(&table_name.as_ref(), family)))?,
     };
-    let chain = match table.get_chain(&IN_CHAIN_NAME) {
+    let chain = match table.get_chain(chain_name.as_ref()) {
         Some(v) => v,
         None => table.add_chain(Arc::new(Chain::new(
-            &IN_CHAIN_NAME.as_ref(),
+            &chain_name.as_ref(),
             table.table.clone(),
         )))?,
     };
 
     let mut rule = Rule::new(chain.chain.clone());
-    rule.add_expr(&Log);
+
+    cb(&mut rule)?;
+
     chain.add_rule(Arc::new(rule))?;
+
+    Ok(())
+}
+
+fn main() -> Result<(), Error> {
+    tracing_subscriber::fmt::init();
+    let mut ruleset = VirtualRuleset::new(CString::new("GeneratedByCIRCE").unwrap())?;
+
+    get_or_create_rule(
+        &mut ruleset,
+        ProtoFamily::Inet,
+        NAT_TABLE_NAME.as_ref(),
+        PREROUTING_CHAIN_NAME.as_ref(),
+        |rule| {
+            rule.add_expr(&Log);
+            Ok(())
+        },
+    )?;
 
     ruleset.apply_overlay()?;
 
