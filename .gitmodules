@@ -4,3 +4,6 @@
 [submodule "mnl"]
 	path = mnl
 	url = git@github.com:nightmared/mnl-rs.git
+[submodule "rustables"]
+	path = rustables
+	url = git@gitlab.com:rustwall/rustables.git

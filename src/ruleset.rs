@@ -1,11 +1,10 @@
-use nftnl::query::send_batch;
-use nftnl::{
-    list_chains_for_table, list_rules_for_chain, list_tables, Batch, Chain, ProtoFamily, Rule,
-    Table,
+use rustables::query::send_batch;
+use rustables::{
+    list_chains_for_table, list_rules_for_chain, list_tables, Batch, Chain, MsgType, ProtoFamily,
+    Rule, Table,
 };
 use std::ffi::{CStr, CString};
-use std::ops::RangeBounds;
-use std::{fmt::Debug, sync::Arc};
+use std::{fmt::Debug, rc::Rc};
 
 use tracing::debug;
 
@@ -30,7 +29,7 @@ impl VirtualRuleset {
         Ok(res)
     }
 
-    pub fn add_table(&mut self, table: Arc<Table>) -> Result<&mut VirtualTable, Error> {
+    pub fn add_table(&mut self, table: Rc<Table>) -> Result<&mut VirtualTable, Error> {
         for cur_table in &self.tables {
             if cur_table.table == table {
                 return Err(Error::AlreadyExistsError);
@@ -49,8 +48,8 @@ impl VirtualRuleset {
     }
 
     pub fn reload_state_from_system(&mut self) -> Result<(), Error> {
-        let nf_tables: Vec<Arc<Table>> = list_tables()?.into_iter().map(Arc::new).collect();
-        let nf_objects: Vec<Arc<Table>> = self.tables.iter().map(|x| x.table.clone()).collect();
+        let nf_tables: Vec<Rc<Table>> = list_tables()?.into_iter().map(Rc::new).collect();
+        let nf_objects: Vec<Rc<Table>> = self.tables.iter().map(|x| x.table.clone()).collect();
 
         // Add missing tables
         for nf_table in &nf_tables {
@@ -61,7 +60,7 @@ impl VirtualRuleset {
         }
 
         // Delete tables that remain but are no longer in use
-        let nf_objets_to_delete: Vec<Arc<Table>> = nf_objects
+        let nf_objets_to_delete: Vec<Rc<Table>> = nf_objects
             .into_iter()
             .filter(|obj| !nf_tables.contains(&obj))
             .collect();
@@ -108,7 +107,6 @@ impl VirtualRuleset {
     }
 
     pub fn delete_overlay(&mut self) -> Result<(), Error> {
-        println!("{:?}", self);
         let mut batch = Batch::new();
 
         for table in &mut self.tables {
@@ -127,14 +125,14 @@ impl VirtualRuleset {
 
 #[derive(Debug, Clone)]
 pub struct VirtualTable {
-    pub table: Arc<Table>,
+    pub table: Rc<Table>,
     chains: Vec<VirtualChain>,
     exists: bool,
     is_overlay: bool,
 }
 
 impl VirtualTable {
-    pub fn new(nf_table: Arc<Table>, userdata: &CStr) -> Result<Self, Error> {
+    pub fn new(nf_table: Rc<Table>, userdata: &CStr) -> Result<Self, Error> {
         let is_overlay = nf_table.get_userdata() == Some(userdata);
 
         let mut res = VirtualTable {
@@ -149,7 +147,7 @@ impl VirtualTable {
         Ok(res)
     }
 
-    pub fn add_chain(&mut self, chain: Arc<Chain>) -> Result<&mut VirtualChain, Error> {
+    pub fn add_chain(&mut self, chain: Rc<Chain>) -> Result<&mut VirtualChain, Error> {
         for cur_chain in &self.chains {
             if cur_chain.chain == chain {
                 return Err(Error::AlreadyExistsError);
@@ -168,11 +166,11 @@ impl VirtualTable {
     }
 
     fn reload_state_from_system(&mut self, userdata: &CStr) -> Result<(), Error> {
-        let nf_chains: Vec<Arc<Chain>> = list_chains_for_table(self.table.clone())?
+        let nf_chains: Vec<Rc<Chain>> = list_chains_for_table(self.table.clone())?
             .into_iter()
-            .map(Arc::new)
+            .map(Rc::new)
             .collect();
-        let nf_objects: Vec<Arc<Chain>> = self.chains.iter().map(|x| x.chain.clone()).collect();
+        let nf_objects: Vec<Rc<Chain>> = self.chains.iter().map(|x| x.chain.clone()).collect();
 
         // Add missing chains
         for nf_chain in &nf_chains {
@@ -183,7 +181,7 @@ impl VirtualTable {
         }
 
         // Delete chains that remain but are no longer in use
-        let nf_objets_to_delete: Vec<Arc<Chain>> = nf_objects
+        let nf_objets_to_delete: Vec<Rc<Chain>> = nf_objects
             .into_iter()
             .filter(|obj| !nf_chains.contains(&obj))
             .collect();
@@ -219,7 +217,7 @@ impl VirtualTable {
             debug!("Creating a new table {:?}", self.table.get_str());
             self.table.set_userdata(userdata);
 
-            batch.add(&self.table, nftnl::MsgType::Add);
+            batch.add(&self.table, MsgType::Add);
         }
 
         for chain in &mut self.chains {
@@ -231,7 +229,7 @@ impl VirtualTable {
 
     fn delete_overlay(&mut self, batch: &mut Batch) -> Result<(), Error> {
         if self.is_overlay && self.exists {
-            batch.add(&self.table, nftnl::MsgType::Del);
+            batch.add(&self.table, MsgType::Del);
         } else {
             for chain in &mut self.chains {
                 chain.delete_overlay(batch)?;
@@ -244,14 +242,14 @@ impl VirtualTable {
 
 #[derive(Debug, Clone)]
 pub struct VirtualChain {
-    pub chain: Arc<Chain>,
-    rules: Vec<VirtualRule>,
+    pub chain: Rc<Chain>,
+    pub rules: Vec<VirtualRule>,
     exists: bool,
     is_overlay: bool,
 }
 
 impl VirtualChain {
-    pub fn new(nf_chain: Arc<Chain>, userdata: &CStr) -> Result<Self, Error> {
+    pub fn new(nf_chain: Rc<Chain>, userdata: &CStr) -> Result<Self, Error> {
         let is_overlay = nf_chain.get_userdata() == Some(userdata);
 
         let mut res = VirtualChain {
@@ -266,7 +264,7 @@ impl VirtualChain {
         Ok(res)
     }
 
-    pub fn add_rule(&mut self, rule: Arc<Rule>) -> Result<&mut VirtualRule, Error> {
+    pub fn add_rule(&mut self, rule: Rc<Rule>) -> Result<&mut VirtualRule, Error> {
         for cur_rule in &self.rules {
             if cur_rule.rule == rule {
                 return Err(Error::AlreadyExistsError);
@@ -295,11 +293,11 @@ impl VirtualChain {
     }
 
     fn reload_state_from_system(&mut self, userdata: &CStr) -> Result<(), Error> {
-        let nf_rules: Vec<Arc<Rule>> = list_rules_for_chain(&self.chain)?
+        let nf_rules: Vec<Rc<Rule>> = list_rules_for_chain(&self.chain)?
             .into_iter()
-            .map(Arc::new)
+            .map(Rc::new)
             .collect();
-        let nf_objects: Vec<Arc<Rule>> = self.rules.iter().map(|x| x.rule.clone()).collect();
+        let nf_objects: Vec<Rc<Rule>> = self.rules.iter().map(|x| x.rule.clone()).collect();
 
         // Add missing rules
         for nf_rule in &nf_rules {
@@ -313,7 +311,7 @@ impl VirtualChain {
         }
 
         // Delete rules that remain but are no longer in use
-        let nf_objets_to_delete: Vec<Arc<Rule>> = nf_objects
+        let nf_objets_to_delete: Vec<Rc<Rule>> = nf_objects
             .into_iter()
             .filter(|obj| !nf_rules.contains(&obj))
             .collect();
@@ -334,7 +332,7 @@ impl VirtualChain {
             debug!("Creating a new chain {:?}", self.chain.get_str());
             self.chain.set_userdata(userdata);
 
-            batch.add(&self.chain, nftnl::MsgType::Add);
+            batch.add(&self.chain, MsgType::Add);
         }
 
         for rule in &mut self.rules {
@@ -346,7 +344,7 @@ impl VirtualChain {
 
     fn delete_overlay(&mut self, batch: &mut Batch) -> Result<(), Error> {
         if self.is_overlay && self.exists {
-            batch.add(&self.chain, nftnl::MsgType::Del);
+            batch.add(&self.chain, MsgType::Del);
         } else {
             for rule in &mut self.rules {
                 rule.delete_overlay(batch)?;
@@ -359,7 +357,7 @@ impl VirtualChain {
 
 #[derive(Debug, Clone)]
 pub struct VirtualRule {
-    pub rule: Arc<Rule>,
+    pub rule: Rc<Rule>,
     exists: bool,
     is_overlay: bool,
 }
@@ -373,14 +371,14 @@ impl VirtualRule {
         debug!("Creating a new rule {:?}", self.rule.get_str());
         self.rule.set_userdata(userdata);
 
-        batch.add(&self.rule, nftnl::MsgType::Add);
+        batch.add(&self.rule, MsgType::Add);
 
         Ok(())
     }
 
     fn delete_overlay(&mut self, batch: &mut Batch) -> Result<(), Error> {
         if self.is_overlay && self.exists {
-            batch.add(&self.rule, nftnl::MsgType::Del);
+            batch.add(&self.rule, MsgType::Del);
         }
 
         Ok(())
