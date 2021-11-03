@@ -90,29 +90,23 @@ impl VirtualRuleset {
         None
     }
 
-    pub fn apply_overlay(&mut self) -> Result<(), Error> {
-        let mut batch = Batch::new();
-
+    pub fn apply_overlay(&mut self, batch: &mut Batch) -> Result<(), Error> {
         for table in &mut self.tables {
-            table.apply_overlay(&mut batch, &self.userdata)?;
+            table.apply_overlay(batch, &self.userdata)?;
         }
-
-        if let Some(mut batch) = batch.finalize() {
-            send_batch(&mut batch)?;
-        }
-
-        self.reload_state_from_system()?;
 
         Ok(())
     }
 
-    pub fn delete_overlay(&mut self) -> Result<(), Error> {
-        let mut batch = Batch::new();
-
+    pub fn delete_overlay(&mut self, batch: &mut Batch) -> Result<(), Error> {
         for table in &mut self.tables {
-            table.delete_overlay(&mut batch)?;
+            table.delete_overlay(batch)?;
         }
 
+        Ok(())
+    }
+
+    pub fn commit(&mut self, batch: Batch) -> Result<(), Error> {
         if let Some(mut batch) = batch.finalize() {
             send_batch(&mut batch)?;
         }
