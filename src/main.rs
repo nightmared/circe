@@ -21,6 +21,8 @@ use config::{Config, Site};
 mod ruleset;
 use ruleset::VirtualRuleset;
 
+use crate::bridge::{interface_get_flags, interface_set_flags, interface_set_ip};
+
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("Query error")]
@@ -175,6 +177,15 @@ fn setup_bridge(conf: &Config) -> Result<(), Error> {
     }
 
     create_bridge(&conf.bridge_name)?;
+
+    // set the interface as UP
+    interface_set_flags(
+        &conf.bridge_name,
+        interface_get_flags(&conf.bridge_name)? | IFF_UP,
+    )?;
+
+    // give it an IP address
+    interface_set_ip(&conf.bridge_name, conf.network)?;
 
     Ok(())
 }

@@ -1,3 +1,5 @@
+use ipnetwork::Ipv4Network;
+use libc::{in_addr, sockaddr_in};
 // Shamelessly taken from https://github.com/levex/network-bridge-rs. Please
 // uphold the rightful copyright owners rights:
 // Copyright 2018 Levente Kurusa <lkurusa@acm.org>
@@ -32,12 +34,21 @@ mod private {
     pub const SIOCBRDELIF: u16 = 0x89a3;
     pub const SIOCGIFFLAGS: u16 = 0x8913;
     pub const SIOCSIFFLAGS: u16 = 0x8914;
+    pub const SIOCSIFADDR: u16 = 0x8916;
+    pub const SIOCSIFNETMASK: u16 = 0x891c;
 
     #[repr(C)]
     #[derive(Debug)]
     pub struct ifreq {
         pub ifrn_name: [libc::c_char; IFNAMSIZ],
         pub ifru_ivalue: u32,
+    }
+
+    #[repr(C)]
+    #[derive(Debug)]
+    pub struct ifreq_ipaddr {
+        pub ifrn_name: [libc::c_char; IFNAMSIZ],
+        pub ifru_ivalue: libc::sockaddr_in,
     }
 
     ioctl_write_ptr_bad!(ioctl_addbr, SIOCBRADDBR, libc::c_char);
@@ -47,11 +58,13 @@ mod private {
     ioctl_write_ptr_bad!(ioctl_delif, SIOCBRDELIF, ifreq);
     ioctl_readwrite_bad!(ioctl_getifflags, SIOCGIFFLAGS, ifreq);
     ioctl_write_ptr_bad!(ioctl_setifflags, SIOCSIFFLAGS, ifreq);
+    ioctl_write_ptr_bad!(ioctl_setifaddr, SIOCSIFADDR, ifreq_ipaddr);
+    ioctl_write_ptr_bad!(ioctl_setifnetmask, SIOCSIFNETMASK, ifreq_ipaddr);
 }
 pub use private::IFNAMSIZ;
 use private::{
-    ifreq, ioctl_addbr, ioctl_addif, ioctl_delbr, ioctl_delif, ioctl_getifflags, ioctl_ifindex,
-    ioctl_setifflags,
+    ifreq, ifreq_ipaddr, ioctl_addbr, ioctl_addif, ioctl_delbr, ioctl_delif, ioctl_getifflags,
+    ioctl_ifindex, ioctl_setifaddr, ioctl_setifflags, ioctl_setifnetmask,
 };
 
 /// Builder pattern for constructing networking bridges.
@@ -278,7 +291,7 @@ pub fn interface_get_flags(interface_name: &str) -> Result<u32, nix::Error> {
     }
 }
 
-pub fn interface_set_flags(interface_name: &str, flags: u32) -> Result<i32, nix::Error> {
+pub fn interface_set_flags(interface_name: &str, flags: u32) -> Result<(), nix::Error> {
     /* validate the interface name */
     if interface_name.len() == 0 || interface_name.len() >= IFNAMSIZ {
         return Err(nix::Error::from(nix::errno::Errno::EINVAL));
@@ -304,6 +317,64 @@ pub fn interface_set_flags(interface_name: &str, flags: u32) -> Result<i32, nix:
         /* copy the bridge name to the ifreq */
         std::ptr::copy_nonoverlapping(if_cstr.as_ptr(), ifr.ifrn_name.as_mut_ptr(), length);
 
-        ioctl_setifflags(sock, &mut ifr as *mut ifreq)
+        ioctl_setifflags(sock, &mut ifr as *mut ifreq)?;
     }
+
+    Ok(())
+}
+
+pub fn interface_set_ip(interface_name: &str, net: Ipv4Network) -> Result<(), nix::Error> {
+    /* validate the interface name */
+    if interface_name.len() == 0 || interface_name.len() >= IFNAMSIZ {
+        return Err(nix::Error::from(nix::errno::Errno::EINVAL));
+    }
+    let length = interface_name.len();
+
+    /* Open a socket */
+    let sock = socket(
+        AddressFamily::Inet,
+        SockType::Datagram,
+        SockFlag::empty(),
+        None,
+    )?;
+
+    let if_cstr = CString::new(interface_name).unwrap();
+
+    let ip = sockaddr_in {
+        sin_family: AddressFamily::Inet as u16,
+        sin_addr: in_addr {
+            s_addr: u32::from(net.ip()).to_be(),
+        },
+        sin_port: 0,
+        sin_zero: [0; 8],
+    };
+
+    let mut ifr_ip = ifreq_ipaddr {
+        ifrn_name: [0; IFNAMSIZ],
+        ifru_ivalue: ip,
+    };
+
+    let mask = sockaddr_in {
+        sin_family: AddressFamily::Inet as u16,
+        sin_addr: in_addr {
+            s_addr: u32::from(net.mask()).to_be(),
+        },
+        sin_port: 0,
+        sin_zero: [0; 8],
+    };
+
+    let mut ifr_mask = ifreq_ipaddr {
+        ifrn_name: [0; IFNAMSIZ],
+        ifru_ivalue: mask,
+    };
+
+    unsafe {
+        std::ptr::copy_nonoverlapping(if_cstr.as_ptr(), ifr_ip.ifrn_name.as_mut_ptr(), length);
+        ioctl_setifaddr(sock, &mut ifr_ip as *mut ifreq_ipaddr)?;
+
+        std::ptr::copy_nonoverlapping(if_cstr.as_ptr(), ifr_mask.ifrn_name.as_mut_ptr(), length);
+        ioctl_setifnetmask(sock, &mut ifr_mask as *mut ifreq_ipaddr)?;
+    }
+
+    Ok(())
 }
