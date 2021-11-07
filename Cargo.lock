@@ -54,6 +54,7 @@ dependencies = [
  "ipnetwork",
  "lazy_static",
  "libc",
+ "nasty_network_ioctls",
  "nix",
  "rustables",
  "serde",
@@ -137,6 +138,15 @@ checksum = "5302035599c722b3a5b92a6502ff73c501dc6d100c53b89f0fae0cb932a37122"
 dependencies = [
  "libc",
  "pkg-config",
+]
+
+[[package]]
+name = "nasty_network_ioctls"
+version = "0.1.0"
+dependencies = [
+ "ipnetwork",
+ "libc",
+ "nix",
 ]
 
 [[package]]

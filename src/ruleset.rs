@@ -24,8 +24,6 @@ impl VirtualRuleset {
             tables: Vec::new(),
         };
 
-        res.reload_state_from_system()?;
-
         Ok(res)
     }
 

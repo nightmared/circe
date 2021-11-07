@@ -5,6 +5,7 @@ use std::fs::File;
 use std::io::Read;
 use std::rc::Rc;
 
+use libc::EEXIST;
 use rustables::expr::{
     Cmp, CmpOp, Counter, Immediate, Meta, Nat, NatType, Payload, Register, TcpHeaderField,
     TransportHeaderField,
@@ -12,16 +13,16 @@ use rustables::expr::{
 use rustables::{Batch, Chain, ProtoFamily, Rule, Table};
 use tracing::{debug, error};
 
-mod bridge;
-use bridge::{create_bridge, delete_bridge, BridgeBuilder};
+use nasty_network_ioctls::{
+    add_interface_to_bridge, create_bridge, create_tap, interface_get_flags, interface_id,
+    interface_is_up, interface_set_flags, interface_set_ip, interface_set_up, BridgeBuilder,
+};
 
 mod config;
 use config::{Config, Site};
 
 mod ruleset;
 use ruleset::VirtualRuleset;
-
-use crate::bridge::{interface_get_flags, interface_set_flags, interface_set_ip};
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -135,12 +136,13 @@ fn create_port_forwarding(ruleset: &mut VirtualRuleset, site: &Site) -> Result<(
 
 fn setup_nat(conf: &Config) -> Result<(), Error> {
     let mut ruleset = VirtualRuleset::new(CString::new("GeneratedByCIRCE").unwrap())?;
+    ruleset.reload_state_from_system()?;
 
-    // TODO: perform that operation atomically
+    // atomic nftables configuration
     let mut batch = Batch::new();
     ruleset.delete_overlay(&mut batch)?;
-    ruleset.commit(batch)?;
 
+    let mut ruleset = VirtualRuleset::new(CString::new("GeneratedByCIRCE").unwrap())?;
     for site in &conf.sites {
         if !conf.network.contains(site.container_ip) {
             error!(
@@ -152,40 +154,52 @@ fn setup_nat(conf: &Config) -> Result<(), Error> {
         create_port_forwarding(&mut ruleset, site)?;
     }
 
-    let mut batch = Batch::new();
     ruleset.apply_overlay(&mut batch)?;
     ruleset.commit(batch)?;
 
     Ok(())
 }
 
-fn setup_bridge(conf: &Config) -> Result<(), Error> {
-    const IFF_UP: u32 = 0x1;
-
-    match bridge::interface_get_flags(&conf.bridge_name) {
-        Ok(cur_flags) => {
-            // if the interace is present and up, set it down, otherwise we will not be able to
-            // delete it
-            if cur_flags & IFF_UP != 0 {
+fn delete_bridge(interface_name: &str) -> Result<(), Error> {
+    // if the interace is present and up, set it down, otherwise we will not be able to
+    // delete it
+    match interface_is_up(interface_name) {
+        Ok(up) => {
+            if up {
                 debug!("The interface was up, setting it down");
-                bridge::interface_set_flags(&conf.bridge_name, cur_flags & (!IFF_UP))?;
+                interface_set_up(interface_name, false)?;
             }
-            delete_bridge(&conf.bridge_name)?;
+            nasty_network_ioctls::delete_bridge(&interface_name)?;
+            Ok(())
         }
-        Err(nix::Error::ENXIO) => {}
-        Err(e) => return Err(e)?,
+        Err(nix::Error::ENODEV) => Ok(()),
+        Err(e) => Err(Error::UnixError(e)),
     }
+}
 
-    create_bridge(&conf.bridge_name)?;
+fn setup_bridge(conf: &Config) -> Result<(), Error> {
+    // TODO: no longer needed in production
+    // delete_bridge(&conf.bridge_name)?;
 
-    // set the interface as UP
-    interface_set_flags(
-        &conf.bridge_name,
-        interface_get_flags(&conf.bridge_name)? | IFF_UP,
-    )?;
+    match create_bridge(&conf.bridge_name) {
+        Ok(_) | Err(nix::errno::Errno::EEXIST) => {}
+        Err(e) => return Err(Error::UnixError(e)),
+    };
 
     // give it an IP address
     interface_set_ip(&conf.bridge_name, conf.network)?;
+
+    let mut i = 0;
+    for site in &conf.sites {
+        let tap_name = format!("{}-{}", conf.bridge_name, i);
+        create_tap(&tap_name)?;
+        add_interface_to_bridge(interface_id(&tap_name)?, &conf.bridge_name)?;
+        interface_set_up(&tap_name, true)?;
+        i += 1;
+    }
+
+    // set the interface as UP
+    interface_set_up(&conf.bridge_name, true)?;
 
     Ok(())
 }

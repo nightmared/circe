@@ -1,9 +1,6 @@
-[submodule "nftnl"]
-	path = nftnl
-	url = git@github.com:nightmared/nftnl-rs.git
-[submodule "mnl"]
-	path = mnl
-	url = git@github.com:nightmared/mnl-rs.git
 [submodule "rustables"]
 	path = rustables
 	url = git@gitlab.com:rustwall/rustables.git
+[submodule "nasty_network_ioctls"]
+	path = nasty_network_ioctls
+	url = git@github.com:nightmared/nasty_network_ioctls.git
