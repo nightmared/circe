@@ -6,6 +6,7 @@ use std::io::Read;
 use std::rc::Rc;
 
 use libc::EEXIST;
+use nix::errno::Errno;
 use rustables::expr::{
     Cmp, CmpOp, Counter, Immediate, Meta, Nat, NatType, Payload, Register, TcpHeaderField,
     TransportHeaderField,
@@ -15,7 +16,8 @@ use tracing::{debug, error};
 
 use nasty_network_ioctls::{
     add_interface_to_bridge, create_bridge, create_tap, interface_get_flags, interface_id,
-    interface_is_up, interface_set_flags, interface_set_ip, interface_set_up, BridgeBuilder,
+    interface_is_up, interface_set_flags, interface_set_ip, interface_set_up,
+    set_alias_to_interface, BridgeBuilder,
 };
 
 mod config;
@@ -40,6 +42,9 @@ pub enum Error {
 
     #[error("Error while manipulating UNIX objects")]
     UnixError(#[from] nix::Error),
+
+    #[error("Error while performing a network Operation")]
+    NetworkError(#[source] std::io::Error),
 }
 
 lazy_static::lazy_static! {
@@ -191,9 +196,13 @@ fn setup_bridge(conf: &Config) -> Result<(), Error> {
 
     let mut i = 0;
     for site in &conf.sites {
-        let tap_name = format!("{}-{}", conf.bridge_name, i);
+        let tap_name = format!("{}-tap{}", conf.bridge_name, i);
         create_tap(&tap_name)?;
-        add_interface_to_bridge(interface_id(&tap_name)?, &conf.bridge_name)?;
+        match add_interface_to_bridge(interface_id(&tap_name)?, &conf.bridge_name) {
+            Ok(_) | Err(Errno::EBUSY) => {}
+            Err(e) => return Err(Error::UnixError(e)),
+        }
+        set_alias_to_interface(&tap_name, &site.container_name).map_err(Error::NetworkError)?;
         interface_set_up(&tap_name, true)?;
         i += 1;
     }
