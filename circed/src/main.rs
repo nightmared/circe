@@ -21,8 +21,7 @@ use nasty_network_ioctls::{
     set_alias_to_interface, BridgeBuilder,
 };
 
-mod config;
-use config::{Config, Site};
+use circe_common::{Config, Site};
 
 mod ruleset;
 use ruleset::VirtualRuleset;
@@ -234,25 +233,6 @@ fn setup_nat(conf: &Config, interfaces: Vec<(String, Ipv4Addr)>) -> Result<(), E
 
     Ok(())
 }
-
-/*
-fn delete_bridge(interface_name: &str) -> Result<(), Error> {
-    // if the interace is present and up, set it down, otherwise we will not be able to
-    // delete it
-    match interface_is_up(interface_name) {
-        Ok(up) => {
-            if up {
-                debug!("The interface was up, setting it down");
-                interface_set_up(interface_name, false)?;
-            }
-            nasty_network_ioctls::delete_bridge(&interface_name)?;
-            Ok(())
-        }
-        Err(nix::Error::ENODEV) => Ok(()),
-        Err(e) => Err(Error::UnixError(e)),
-    }
-}
-*/
 
 // return a list of (intrerface_name, ip) tuples
 fn setup_bridge(conf: &Config) -> Result<Vec<(String, Ipv4Addr)>, Error> {
