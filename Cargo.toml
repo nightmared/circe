@@ -5,7 +5,7 @@ edition = "2018"
 resolver = "2"
 
 [dependencies]
-rustables = { path = "rustables/rustables", features = [ "query" ] }
+rustables = { path = "rustables", features = [ "query" ] }
 nasty_network_ioctls = { path = "nasty_network_ioctls" }
 lazy_static = "1.4.0"
 thiserror = "1.0"

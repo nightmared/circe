@@ -7,6 +7,7 @@ use serde_derive::Deserialize;
 pub struct Config {
     pub network: Ipv4Network,
     pub bridge_name: String,
+    pub listening_port: u16,
 
     pub sites: Vec<Site>,
 }
