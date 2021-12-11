@@ -1,12 +1,12 @@
 [package]
-name = "initrd"
+name = "circe_initramfs"
 version = "0.1.0"
 authors = ["Simon THOBY <git@nightmared.fr>"]
 edition = "2018"
 
 [dependencies]
 libc = "0.2"
-nix = "0.20.0"
+nix = "0.23"
 thiserror = "1.0"
 nasty_network_ioctls = { path = "../deps/nasty_network_ioctls" }
 ipnetwork = "0.18"

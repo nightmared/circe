@@ -250,7 +250,7 @@ fn main() -> Result<(), Error> {
             std::thread::spawn(move || -> ! { send_ping(ip.ip(), gateway) });
 
             let req_path = format!(
-                "http://{}:{}/challenges/{}.tar",
+                "http://{}:{}/challenges/{}/image",
                 gateway, server_port, challenge,
             );
             ureq::get(&req_path).call()?
@@ -338,7 +338,7 @@ fn main() -> Result<(), Error> {
 
     loop {
         if let Err(e) = nix::sys::wait::waitpid(nix::unistd::Pid::from_raw(-1), None) {
-            if e == nix::Error::from_errno(nix::errno::Errno::ECHILD) {
+            if e == nix::errno::Errno::ECHILD {
                 break;
             }
             panic!("{:?}", e);

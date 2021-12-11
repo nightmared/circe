@@ -19,12 +19,10 @@ pub struct VirtualRuleset {
 impl VirtualRuleset {
     /// `userdata` is used to determine which objects are part of the overlay.
     pub fn new(userdata: CString) -> Result<Self, Error> {
-        let mut res = VirtualRuleset {
+        Ok(VirtualRuleset {
             userdata,
             tables: Vec::new(),
-        };
-
-        Ok(res)
+        })
     }
 
     pub fn add_table(&mut self, table: Rc<Table>) -> Result<&mut VirtualTable, Error> {
@@ -271,17 +269,6 @@ impl VirtualChain {
 
         let pos = self.rules.len() - 1;
         Ok(&mut self.rules[pos])
-    }
-
-    pub fn get_rule(&mut self, handle: u64) -> Option<&mut VirtualRule> {
-        let mut compare_rule = Rule::new(self.chain.clone());
-        compare_rule.set_handle(handle);
-        for rule in &mut self.rules {
-            if *rule.rule == compare_rule {
-                return Some(rule);
-            }
-        }
-        None
     }
 
     fn reload_state_from_system(&mut self, userdata: &CStr) -> Result<(), Error> {
