@@ -2,6 +2,7 @@ use std::ffi::{CStr, CString};
 use std::net::Ipv4Addr;
 use std::rc::Rc;
 
+use libc::getpwnam;
 use nasty_network_ioctls::{
     add_interface_to_bridge, create_bridge, create_tap, interface_id, interface_set_ip,
     interface_set_up, set_alias_to_interface,
@@ -9,7 +10,7 @@ use nasty_network_ioctls::{
 use nix::errno::Errno;
 use rustables::expr::{
     Bitwise, Cmp, CmpOp, Conntrack, Counter, Immediate, Ipv4HeaderField, Meta, Nat, NatType,
-    NetworkHeaderField, Payload, Register, States, TcpHeaderField, TransportHeaderField,
+    NetworkHeaderField, Payload, Register, States, TcpHeaderField, TransportHeaderField, Verdict,
 };
 use rustables::{Batch, Chain, ProtoFamily, Rule, RuleMethods, Table};
 use tracing::error;
@@ -114,7 +115,10 @@ fn allow_containers_to_phone_home(
             FILTER_TABLE_NAME.as_ref(),
             |_table| Ok(()),
             OUTPUT_CHAIN_NAME.as_ref(),
-            |_chain| Ok(()),
+            |chain| {
+                chain.set_type(rustables::ChainType::Filter);
+                Ok(())
+            },
             |mut rule| {
                 let mut name_arr = [0u8; libc::IFNAMSIZ];
                 for (pos, i) in interface_name.bytes().enumerate() {
@@ -173,6 +177,34 @@ fn create_port_forwarding(ruleset: &mut VirtualRuleset, chall: &Challenge) -> Re
     )
 }
 
+fn disable_arbitrary_forwarding(
+    ruleset: &mut VirtualRuleset,
+    interface_name: &str,
+) -> Result<(), Error> {
+    get_or_create_rule(
+        ruleset,
+        ProtoFamily::Ipv4,
+        FILTER_TABLE_NAME.as_ref(),
+        |_table| Ok(()),
+        FORWARD_CHAIN_NAME.as_ref(),
+        |chain| {
+            chain.set_type(rustables::ChainType::Filter);
+            Ok(())
+        },
+        |mut rule| {
+            let mut name_arr = [0u8; libc::IFNAMSIZ];
+            for (pos, i) in interface_name.bytes().enumerate() {
+                name_arr[pos] = i;
+            }
+            rule.add_expr(&Meta::IifName);
+            rule.add_expr(&Cmp::new(CmpOp::Eq, name_arr.as_ref()));
+            rule.add_expr(&Counter::new());
+            rule.add_expr(&Verdict::Drop);
+            Ok(rule)
+        },
+    )
+}
+
 pub fn setup_nat(conf: &Config, interfaces: Vec<(String, Ipv4Addr)>) -> Result<(), Error> {
     let userdata = CString::new(conf.bridge_name.as_str())?;
     let mut ruleset = VirtualRuleset::new(userdata.clone())?;
@@ -196,6 +228,8 @@ pub fn setup_nat(conf: &Config, interfaces: Vec<(String, Ipv4Addr)>) -> Result<(
 
     allow_containers_to_phone_home(&mut ruleset, conf, interfaces)?;
 
+    disable_arbitrary_forwarding(&mut ruleset, &conf.bridge_name)?;
+
     ruleset.apply_overlay(&mut batch)?;
     ruleset.commit(batch)?;
 
@@ -216,7 +250,23 @@ pub fn setup_bridge(conf: &Config) -> Result<Vec<(String, Ipv4Addr)>, Error> {
 
     for i in 0..conf.challenges.len() {
         let tap_name = format!("{}-tap{}", conf.bridge_name, i);
-        create_tap(&tap_name)?;
+
+        let owner_uid = unsafe {
+            let cstr = CString::new(conf.user.as_bytes()).unwrap();
+            let ptr = getpwnam(cstr.as_ptr());
+            if ptr.is_null() {
+                return Err(Error::UnknownUser);
+            } else {
+                (*ptr).pw_uid
+            }
+        };
+
+        // EBUSY is expected is if the TAP device is already used
+        match create_tap(&tap_name, owner_uid) {
+            Ok(_) | Err(Errno::EBUSY) => {}
+            Err(e) => return Err(Error::UnixError(e)),
+        }
+
         match add_interface_to_bridge(interface_id(&tap_name)?, &conf.bridge_name) {
             Ok(_) | Err(Errno::EBUSY) => {}
             Err(e) => return Err(Error::UnixError(e)),

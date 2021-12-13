@@ -156,6 +156,8 @@ dependencies = [
  "ipnetwork 0.18.0",
  "serde",
  "serde_derive",
+ "thiserror",
+ "toml",
 ]
 
 [[package]]
@@ -177,6 +179,12 @@ dependencies = [
 [[package]]
 name = "circe_launcher"
 version = "0.1.0"
+dependencies = [
+ "circe_common",
+ "qapi",
+ "thiserror",
+ "ureq",
+]
 
 [[package]]
 name = "circed"
@@ -193,7 +201,6 @@ dependencies = [
  "serde_derive",
  "thiserror",
  "tokio",
- "toml",
  "tracing",
  "tracing-subscriber",
  "warp",
@@ -856,6 +863,60 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fb37d2df5df740e582f28f8560cf425f52bb267d872fe58358eadb554909f07a"
 dependencies = [
  "unicode-xid",
+]
+
+[[package]]
+name = "qapi"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "37a6fe62413c9eec316d34ed057e19e2a47bfa5a6094ccaf6de81ceeefee74a0"
+dependencies = [
+ "log",
+ "qapi-qmp",
+ "qapi-spec",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "qapi-codegen"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "060c83952f4db54e1b6c9e7713dd8b6cec1d14283c91aae89fd8dfeb8d46a960"
+dependencies = [
+ "qapi-parser",
+]
+
+[[package]]
+name = "qapi-parser"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92495a78224a474b73d218f3e945d919cbf6e869219101d584aede89976994e4"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "qapi-qmp"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df6a8fad0de1fe3d8b2bf2fb617579cb1e9d60a470760ed28c93839072cc7084"
+dependencies = [
+ "qapi-codegen",
+ "qapi-spec",
+ "serde",
+]
+
+[[package]]
+name = "qapi-spec"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b360919a24ea5fc02fa762cb01bd8f43b643fee51c585f763257773b4dc5a9e8"
+dependencies = [
+ "base64",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

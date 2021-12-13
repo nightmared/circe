@@ -26,7 +26,7 @@ cp -r tmp/busybox/_install/{bin,sbin} out/initramfs/
 cp target/x86_64-unknown-linux-musl/release/circe_initramfs out/initramfs/init
 
 pushd out/initramfs/
-find . -type f | cpio --create --format=newc > ../initramfs.cpio
+find . | cpio --create --format=newc > ../initramfs.cpio
 popd
 
 echo "The output is available at out/initramfs.cpio"

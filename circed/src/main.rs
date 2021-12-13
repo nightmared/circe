@@ -1,11 +1,10 @@
-// "inspired" from https://raw.githubusercontent.com/mullvad/mullvadvpn-app/d92376b4d1df9b547930c68aa9bae9640ff2a022/talpid-core/src/firewall/linux.rs
+// The network part of this crate is "inspired" from https://raw.githubusercontent.com/mullvad/mullvadvpn-app/d92376b4d1df9b547930c68aa9bae9640ff2a022/talpid-core/src/firewall/linux.rs
 use std::fmt::Debug;
-use std::fs::File;
-use std::io::Read;
 
 use tracing::error;
+use warp::Filter;
 
-use circe_common::{Challenge, Config};
+use circe_common::{load_config, Challenge, Config, ConfigError};
 
 mod network;
 use network::{setup_bridge, setup_nat};
@@ -20,11 +19,8 @@ pub enum Error {
     #[error("The target obejct already exists")]
     AlreadyExistsError,
 
-    #[error("The configuration file presents an issue")]
-    ConfigurationFileError(#[source] std::io::Error),
-
-    #[error("The configuration couldn't be parsed")]
-    ConfigurationParsingError(#[from] toml::de::Error),
+    #[error("Loading the configuration fail")]
+    ConfigurationError(#[from] ConfigError),
 
     #[error("Error while manipulating UNIX objects")]
     UnixError(#[from] nix::Error),
@@ -34,6 +30,9 @@ pub enum Error {
 
     #[error("String contains null bytes")]
     NullBytesError(#[from] std::ffi::NulError),
+
+    #[error("This user couldn't be found")]
+    UnknownUser,
 }
 
 fn setup_network(conf: Config) -> Result<(), Error> {
@@ -47,22 +46,18 @@ async fn main() -> Result<(), Error> {
     // init the tracing subsystem
     tracing_subscriber::fmt::init();
 
-    // load the configuration
-    let mut config_file =
-        File::open("config.toml").map_err(|x| Error::ConfigurationFileError(x))?;
-    let mut config_content = String::with_capacity(5000);
-    config_file
-        .read_to_string(&mut config_content)
-        .map_err(|x| Error::ConfigurationFileError(x))?;
-    let config: Config = toml::from_str(&config_content)?;
+    let config = load_config()?;
 
     setup_network(config.clone())?;
 
-    /*
-    warp::serve(hello)
+    let serve_containers = warp::path("challenges")
+        .and(warp::path::param())
+        .and(warp::path::path("image"))
+        .map(|container_name: String| format!("Hi {}", container_name));
+
+    warp::serve(serve_containers)
         .run((config.network.ip(), config.listening_port))
         .await;
-        */
 
     Ok(())
 }

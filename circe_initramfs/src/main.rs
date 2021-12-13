@@ -11,6 +11,7 @@ use std::net::Ipv4Addr;
 use std::panic::catch_unwind;
 use std::path::Path;
 use std::str::FromStr;
+use std::time::Duration;
 use thiserror::Error;
 
 use serde_derive::Deserialize;
@@ -138,6 +139,8 @@ fn main() -> Result<(), Error> {
 
     // redirect output to the kernel console (should also appear on the serial device)
     setup_term(true)?;
+
+    std::thread::sleep(Duration::new(2, 0));
 
     println!("[*] Hello and welcome to circe-initramfs");
     println!("[+] copying the content of the initramfs to /newfs");
