@@ -17,4 +17,5 @@ ipnetwork = "0.18"
 nix = "0.23"
 circe_common = { path = "../circe_common" }
 tokio = { version = "1", features = ["full"] }
-warp = "0.3"
+tokio-util = { version = "0.6", features = ["io"] }
+hyper = { version = "0.14", features = ["server", "tcp", "http1", "stream"] }

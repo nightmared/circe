@@ -1,0 +1,8 @@
+[package]
+name = "circe_save"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+circe_common = { path = "../circe_common" }
+thiserror = "1.0"

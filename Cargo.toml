@@ -5,6 +5,7 @@ members = [
     "circe_common",
     "circe_initramfs",
     "circe_launcher",
+    "circe_save"
 ]
 
 [profile.release]

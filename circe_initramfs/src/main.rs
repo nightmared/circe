@@ -3,10 +3,12 @@ use nasty_network_ioctls::{interface_set_ip, interface_set_up};
 use nix::fcntl::{readlink, OFlag};
 use nix::mount::{mount, umount, MsFlags};
 use nix::sys::stat::Mode;
-use nix::unistd::{chdir, chroot, execve, fork, mkdir, setsid, ForkResult};
+use nix::unistd::{chdir, chroot, execve, execvpe, fork, mkdir, setsid, ForkResult};
+use std::convert::Infallible;
 use std::ffi::NulError;
 use std::ffi::{CStr, CString};
 use std::fs::{create_dir, remove_dir, remove_dir_all, remove_file, File};
+use std::io::Read;
 use std::net::Ipv4Addr;
 use std::panic::catch_unwind;
 use std::path::Path;
@@ -30,6 +32,10 @@ pub struct DockerImageConfig {
     cmd: Vec<String>,
     #[serde(rename = "Entrypoint")]
     entrypoint: Option<Vec<String>>,
+    #[serde(rename = "Env")]
+    env_variables: Vec<String>,
+    #[serde(rename = "WorkingDir")]
+    work_directory: String,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -140,9 +146,8 @@ fn main() -> Result<(), Error> {
     // redirect output to the kernel console (should also appear on the serial device)
     setup_term(true)?;
 
-    std::thread::sleep(Duration::new(2, 0));
-
     println!("[*] Hello and welcome to circe-initramfs");
+
     println!("[+] copying the content of the initramfs to /newfs");
 
     // move to a new ramfs, because we cannot pivot_root() on the initramfs, and runc needs it
@@ -226,40 +231,44 @@ fn main() -> Result<(), Error> {
 
     println!("[+] setting up the network");
 
-    let mut ip = None;
-    let mut challenge = None;
-    let mut server_port = None;
-    for v in std::fs::read_to_string("/proc/cmdline")?.split(" ") {
-        if v.starts_with("ip=") {
-            ip = Some(Ipv4Network::from_str(&v[3..].trim()).unwrap());
+    let (ip, challenge, server_port) = {
+        let mut ip = None;
+        let mut challenge = None;
+        let mut server_port = None;
+        for v in std::fs::read_to_string("/proc/cmdline")?.split(" ") {
+            if v.starts_with("ip=") {
+                ip = Some(Ipv4Network::from_str(&v[3..].trim()).unwrap());
+            }
+            if v.starts_with("challenge=") {
+                challenge = Some(v[10..].to_string());
+            }
+            if v.starts_with("port=") {
+                server_port = Some(u16::from_str(&v[5..])?);
+            }
         }
-        if v.starts_with("challenge=") {
-            challenge = Some(v[10..].to_string());
+
+        match (ip, challenge, server_port) {
+            (None, _, _) | (_, None, _) | (_, _, None) => {
+                panic!("Missing IP address/port/challenge was supplied, cannot phone home!")
+            }
+            (Some(ip), Some(challenge), Some(server_port)) => (ip, challenge, server_port),
         }
-        if v.starts_with("port=") {
-            server_port = Some(u16::from_str(&v[5..])?);
-        }
-    }
-
-    let tar_file = match (ip, challenge, server_port) {
-        (Some(ip), Some(challenge), Some(server_port)) => {
-            interface_set_ip("eth0", ip).unwrap();
-            interface_set_up("eth0", true).unwrap();
-
-            println!("[+] downloading the container image");
-
-            let gateway = ip.nth(1).unwrap();
-
-            std::thread::spawn(move || -> ! { send_ping(ip.ip(), gateway) });
-
-            let req_path = format!(
-                "http://{}:{}/challenges/{}/image",
-                gateway, server_port, challenge,
-            );
-            ureq::get(&req_path).call()?
-        }
-        _ => panic!("Missing IP address/port/challenge was supplied, cannot phone home!"),
     };
+
+    interface_set_ip("eth0", ip).unwrap();
+    interface_set_up("eth0", true).unwrap();
+
+    println!("[+] downloading the container image");
+
+    let gateway = ip.nth(1).unwrap();
+
+    std::thread::spawn(move || -> ! { send_ping(ip.ip(), gateway) });
+
+    let req_path = format!(
+        "http://{}:{}/challenges/{}/image",
+        gateway, server_port, challenge,
+    );
+    let tar_file = ureq::get(&req_path).call()?;
 
     // setup the dirs that will hold the container data
     std::fs::create_dir(CONTAINER_PATH)?;
@@ -269,9 +278,10 @@ fn main() -> Result<(), Error> {
 
     println!("[+] extracting the main image");
 
-    let tar_reader = tar_file.into_reader();
-    let mut archive = tar::Archive::new(tar_reader);
-    archive.unpack(TMP_TAR_PATH)?;
+    {
+        let mut archive = tar::Archive::new(tar_file.into_reader());
+        archive.unpack(TMP_TAR_PATH)?;
+    }
 
     let manifest = {
         let res: Vec<DockerImageManifest> =
@@ -284,12 +294,19 @@ fn main() -> Result<(), Error> {
         res[0].clone()
     };
 
-    let image_config: DockerImage = serde_json::from_reader(File::open(&format!(
+    let mut image_config: DockerImage = serde_json::from_reader(File::open(&format!(
         "{}/{}",
         TMP_TAR_PATH, manifest.config
     ))?)?;
 
+    if image_config.config.work_directory == "" {
+        image_config.config.work_directory = String::from("/");
+    }
+
     // extract all the layers in the rootfs folder
+    // IMPORTANT: note that we do not support layer whiteouts for now
+    // (https://github.com/opencontainers/image-spec/blob/main/layer.md#whiteouts),
+    // so we require squashed images
     for layer_archive in &manifest.layers {
         println!("[+] extracting the layer {}", layer_archive);
         let mut archive =
@@ -300,43 +317,57 @@ fn main() -> Result<(), Error> {
     // cleanup for keeping our memory footprint as small as possible
     std::fs::remove_dir_all(TMP_TAR_PATH)?;
 
+    //if let ForkResult::Child = unsafe { fork()? } {
+    chdir(ROOTFS_PATH)?;
+    chroot(".")?;
+    chdir(Path::new(&image_config.config.work_directory))?;
+
+    setsid()?;
+    //let console_fd = nix::fcntl::open("/logs", OFlag::O_CREAT | OFlag::O_RDWR, Mode::empty())?;
+    //nix::unistd::dup2(console_fd, 0)?;
+    //nix::unistd::dup2(console_fd, 1)?;
+    //nix::unistd::dup2(console_fd, 2)?;
+    //nix::unistd::close(console_fd)?;
+
+    println!("[+] chrooted inside the «container»");
+
+    let mut cmd = Vec::new();
+    if let Some(v) = image_config.config.entrypoint {
+        for arg in v {
+            cmd.push(CString::new(arg)?);
+        }
+    }
+    for arg in image_config.config.cmd {
+        cmd.push(CString::new(arg)?);
+    }
+
+    println!("[+] launching the «container» with args {:?}", cmd);
+
+    let mut env: Vec<CString> = image_config
+        .config
+        .env_variables
+        .into_iter()
+        .map(|x| CString::new(x))
+        .flatten()
+        .collect();
+    env.push(CString::new(format!("HOSTNAME={}", &challenge))?);
+    env.push(CString::new(format!(
+        "PWD={}",
+        &image_config.config.work_directory
+    ))?);
+
+    execvpe(cmd[0].as_c_str(), &cmd, &env)?;
+    //}
+
     println!("[+] spawing a shell");
 
     if let ForkResult::Child = unsafe { fork()? } {
-        let mut cmd = Vec::new();
-        if let Some(v) = image_config.config.entrypoint {
-            for arg in v {
-                cmd.push(CString::new(arg)?);
-            }
-        }
-        for arg in image_config.config.cmd {
-            cmd.push(CString::new(arg)?);
-        }
-
-        println!("[+] chrooting into the «container»");
-
-        chdir(ROOTFS_PATH)?;
-        chroot(".")?;
-        chdir("/")?;
-
-        println!("[+] launching the «container» with args {:?}", cmd);
-
-        let console_fd = nix::fcntl::open("/logs", OFlag::O_CREAT | OFlag::O_RDWR, Mode::empty())?;
-        nix::unistd::dup2(console_fd, 0)?;
-        nix::unistd::dup2(console_fd, 1)?;
-        nix::unistd::dup2(console_fd, 2)?;
-        nix::unistd::close(console_fd)?;
-
-        execve(cmd[0].as_c_str(), &cmd, &[] as &[&CStr])?;
-    }
-
-    if let ForkResult::Child = unsafe { fork()? } {
-        setsid()?;
-        // open the serial device and make it the controlling terminal
-        setup_term(false)?;
+        //setsid()?;
+        //// open the serial device and make it the controlling terminal
+        //setup_term(false)?;
 
         let sh_path = CStr::from_bytes_with_nul(b"/bin/sh\0").unwrap();
-        nix::unistd::execve(sh_path, &[sh_path], &[] as &[&CStr; 0])?;
+        execve(sh_path, &[sh_path], &[] as &[&CStr; 0])?;
     }
 
     loop {

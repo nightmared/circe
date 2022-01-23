@@ -74,9 +74,12 @@ fn get_or_create_rule(
 fn allow_containers_to_phone_home(
     ruleset: &mut VirtualRuleset,
     conf: &Config,
-    interfaces: Vec<(String, Ipv4Addr)>,
 ) -> Result<(), Error> {
-    for (interface_name, interface_ip) in interfaces {
+    for chall in conf.challenges.values() {
+        let mut name_arr = [0u8; libc::IFNAMSIZ];
+        for (pos, i) in chall.tap_name.bytes().enumerate() {
+            name_arr[pos] = i;
+        }
         get_or_create_rule(
             ruleset,
             ProtoFamily::Ipv4,
@@ -85,10 +88,6 @@ fn allow_containers_to_phone_home(
             OUTPUT_CHAIN_NAME.as_ref(),
             |_chain| Ok(()),
             |mut rule| {
-                let mut name_arr = [0u8; libc::IFNAMSIZ];
-                for (pos, i) in interface_name.bytes().enumerate() {
-                    name_arr[pos] = i;
-                }
                 rule.add_expr(&Meta::IifName);
                 rule.add_expr(&Cmp::new(CmpOp::Eq, name_arr.as_ref()));
                 rule.add_expr(&Meta::L4Proto);
@@ -104,7 +103,7 @@ fn allow_containers_to_phone_home(
                 rule.add_expr(&Payload::Network(NetworkHeaderField::Ipv4(
                     Ipv4HeaderField::Saddr,
                 )));
-                rule.add_expr(&Cmp::new(CmpOp::Eq, interface_ip));
+                rule.add_expr(&Cmp::new(CmpOp::Eq, chall.container_ip));
                 Ok(rule.accept())
             },
         )?;
@@ -120,10 +119,6 @@ fn allow_containers_to_phone_home(
                 Ok(())
             },
             |mut rule| {
-                let mut name_arr = [0u8; libc::IFNAMSIZ];
-                for (pos, i) in interface_name.bytes().enumerate() {
-                    name_arr[pos] = i;
-                }
                 rule.add_expr(&Meta::IifName);
                 rule.add_expr(&Cmp::new(CmpOp::Eq, name_arr.as_ref()));
                 rule.add_expr(&Meta::L4Proto);
@@ -205,7 +200,7 @@ fn disable_arbitrary_forwarding(
     )
 }
 
-pub fn setup_nat(conf: &Config, interfaces: Vec<(String, Ipv4Addr)>) -> Result<(), Error> {
+pub fn setup_nat(conf: &Config) -> Result<(), Error> {
     let userdata = CString::new(conf.bridge_name.as_str())?;
     let mut ruleset = VirtualRuleset::new(userdata.clone())?;
     ruleset.reload_state_from_system()?;
@@ -215,7 +210,7 @@ pub fn setup_nat(conf: &Config, interfaces: Vec<(String, Ipv4Addr)>) -> Result<(
     ruleset.delete_overlay(&mut batch)?;
 
     let mut ruleset = VirtualRuleset::new(userdata)?;
-    for chall in &conf.challenges {
+    for chall in conf.challenges.values() {
         if !conf.network.contains(chall.container_ip) {
             error!(
                 "The configuration of challenge '{:?}' contains an invalid IP (out of the target network)",
@@ -226,7 +221,7 @@ pub fn setup_nat(conf: &Config, interfaces: Vec<(String, Ipv4Addr)>) -> Result<(
         create_port_forwarding(&mut ruleset, chall)?;
     }
 
-    allow_containers_to_phone_home(&mut ruleset, conf, interfaces)?;
+    allow_containers_to_phone_home(&mut ruleset, &conf)?;
 
     disable_arbitrary_forwarding(&mut ruleset, &conf.bridge_name)?;
 
@@ -236,8 +231,7 @@ pub fn setup_nat(conf: &Config, interfaces: Vec<(String, Ipv4Addr)>) -> Result<(
     Ok(())
 }
 
-/// Returns a list of (intrerface_name, ip) tuples
-pub fn setup_bridge(conf: &Config) -> Result<Vec<(String, Ipv4Addr)>, Error> {
+pub fn setup_bridge(conf: &Config) -> Result<(), Error> {
     match create_bridge(&conf.bridge_name) {
         Ok(_) | Err(nix::errno::Errno::EEXIST) => {}
         Err(e) => return Err(Error::UnixError(e)),
@@ -246,11 +240,7 @@ pub fn setup_bridge(conf: &Config) -> Result<Vec<(String, Ipv4Addr)>, Error> {
     // give it an IP address
     interface_set_ip(&conf.bridge_name, conf.network)?;
 
-    let mut res = Vec::with_capacity(conf.challenges.len());
-
-    for i in 0..conf.challenges.len() {
-        let tap_name = format!("{}-tap{}", conf.bridge_name, i);
-
+    for chall in conf.challenges.values() {
         let owner_uid = unsafe {
             let cstr = CString::new(conf.user.as_bytes()).unwrap();
             let ptr = getpwnam(cstr.as_ptr());
@@ -262,23 +252,21 @@ pub fn setup_bridge(conf: &Config) -> Result<Vec<(String, Ipv4Addr)>, Error> {
         };
 
         // EBUSY is expected is if the TAP device is already used
-        match create_tap(&tap_name, owner_uid) {
+        match create_tap(&chall.tap_name, owner_uid) {
             Ok(_) | Err(Errno::EBUSY) => {}
             Err(e) => return Err(Error::UnixError(e)),
         }
 
-        match add_interface_to_bridge(interface_id(&tap_name)?, &conf.bridge_name) {
+        match add_interface_to_bridge(interface_id(&chall.tap_name)?, &conf.bridge_name) {
             Ok(_) | Err(Errno::EBUSY) => {}
             Err(e) => return Err(Error::UnixError(e)),
         }
-        set_alias_to_interface(&tap_name, &conf.challenges[i].container_name)
-            .map_err(Error::NetworkError)?;
-        interface_set_up(&tap_name, true)?;
-        res.push((tap_name, conf.challenges[i].container_ip));
+        set_alias_to_interface(&chall.tap_name, &chall.name).map_err(Error::NetworkError)?;
+        interface_set_up(&chall.tap_name, true)?;
     }
 
     // set the interface as UP
     interface_set_up(&conf.bridge_name, true)?;
 
-    Ok(res)
+    Ok(())
 }

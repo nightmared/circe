@@ -1,5 +1,7 @@
+use std::collections::HashMap;
 use std::io::Read;
 use std::net::Ipv4Addr;
+use std::path::PathBuf;
 
 use ipnetwork::Ipv4Network;
 use serde_derive::{Deserialize, Serialize};
@@ -14,28 +16,104 @@ pub enum ConfigError {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct Config {
+pub struct RawConfig {
     pub network: Ipv4Network,
     pub bridge_name: String,
     pub listening_port: u16,
     pub user: String,
+    pub src_folder: String,
+    pub image_folder: String,
 
-    pub challenges: Vec<Challenge>,
+    pub challenges: Vec<RawChallenge>,
 }
 
 fn default_memory_allocation() -> usize {
     // 1GB
-    return 1024;
+    1024
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct Challenge {
-    pub container_name: String,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawChallenge {
+    pub name: String,
     pub source_port: u16,
     pub destination_port: u16,
     pub container_ip: Ipv4Addr,
     #[serde(rename = "memory_in_MB", default = "default_memory_allocation")]
     pub memory_allocation: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Config {
+    pub network: Ipv4Network,
+    pub bridge_name: String,
+    pub listening_port: u16,
+    pub user: String,
+    pub src_folder: PathBuf,
+    pub image_folder: PathBuf,
+
+    // name -> value
+    pub challenges: HashMap<String, Challenge>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            network: Ipv4Network::new(Ipv4Addr::new(127, 0, 0, 1), 32).unwrap(),
+            bridge_name: String::new(),
+            listening_port: 0,
+            user: String::new(),
+            src_folder: PathBuf::new(),
+            image_folder: PathBuf::new(),
+            challenges: HashMap::new(),
+        }
+    }
+}
+
+impl From<RawConfig> for Config {
+    fn from(raw: RawConfig) -> Self {
+        let mut challs = HashMap::with_capacity(raw.challenges.len());
+
+        for (pos, chall) in raw.challenges.into_iter().enumerate() {
+            let tap_name = format!("{}-tap{}", raw.bridge_name, pos);
+            challs.insert(chall.name.clone(), Challenge::from_raw(chall, tap_name));
+        }
+
+        Config {
+            network: raw.network,
+            bridge_name: raw.bridge_name,
+            listening_port: raw.listening_port,
+            user: raw.user,
+            src_folder: PathBuf::from(raw.src_folder),
+            image_folder: PathBuf::from(raw.image_folder),
+            challenges: challs,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Challenge {
+    // both the name of the container and of the challenge
+    pub name: String,
+    pub tap_name: String,
+    pub source_port: u16,
+    pub destination_port: u16,
+    pub container_ip: Ipv4Addr,
+    pub memory_allocation: usize,
+    pub serial_pts: Option<String>,
+}
+
+impl Challenge {
+    fn from_raw(raw: RawChallenge, tap_name: String) -> Self {
+        Challenge {
+            name: raw.name,
+            tap_name,
+            source_port: raw.source_port,
+            destination_port: raw.destination_port,
+            container_ip: raw.container_ip,
+            memory_allocation: raw.memory_allocation,
+            serial_pts: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,15 +123,7 @@ pub enum Request {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GeneralInfo {
-    pub challenges: Vec<ChallengeInfo>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChallengeInfo {
-    pub challenge_file_name: String,
-    pub port: u16,
-    pub ip: Ipv4Network,
-    pub serial_pts: Option<String>,
+    pub challenges: Vec<Challenge>,
 }
 
 pub fn load_config() -> Result<Config, ConfigError> {
@@ -61,5 +131,7 @@ pub fn load_config() -> Result<Config, ConfigError> {
     let mut config_file = std::fs::File::open("config.toml")?;
     let mut config_content = String::with_capacity(5000);
     config_file.read_to_string(&mut config_content)?;
-    Ok(toml::from_str(&config_content)?)
+
+    let raw: RawConfig = toml::from_str(&config_content)?;
+    Ok(Config::from(raw))
 }

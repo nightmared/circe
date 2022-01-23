@@ -14,12 +14,10 @@ pub enum Error {
     QueryError(#[from] ureq::Error),
     #[error("Could not load the CIRCE configuration")]
     ConfigurationError(#[from] ConfigError),
-    #[error("circed_launcher was not launched with the right amount of arguments")]
+    #[error("The program was not launched with the right amount of arguments")]
     InvalidArgumentNumber,
     #[error("The challenge does not exist")]
     ChallengeDoesNotExist,
-    #[error("There is multiple challenges with the same container name")]
-    MultipleChallengesWithIdenticalName,
     #[error("Couldn't communicate with QEMU")]
     QMPError(#[from] qapi::ExecuteError),
 }
@@ -32,20 +30,17 @@ fn main() -> Result<(), Error> {
         return Err(Error::InvalidArgumentNumber);
     }
     let container_name = args.skip(1).next().unwrap();
-    let matching_challenges: Vec<_> = config
-        .challenges
-        .iter()
-        .enumerate()
-        .filter(|(_pos, chall)| chall.container_name == container_name)
-        .collect();
 
-    if matching_challenges.len() == 0 {
-        return Err(Error::ChallengeDoesNotExist);
-    } else if matching_challenges.len() > 1 {
-        return Err(Error::MultipleChallengesWithIdenticalName);
-    }
+    let chall = match config.challenges.get(&container_name) {
+        Some(x) => x,
+        None => return Err(Error::ChallengeDoesNotExist),
+    };
 
-    let (chall_number, chall) = &matching_challenges[0];
+    let filesystem_path = {
+        let mut path = config.image_folder.clone();
+        path.push(&format!("{}.sqsh", chall.name));
+        path.to_string_lossy().to_string()
+    };
 
     // generate unique MAC addresses
     let mut macaddr = String::from("66:60");
@@ -53,7 +48,7 @@ fn main() -> Result<(), Error> {
         macaddr.push_str(&format!(":{:02x}", octet));
     }
 
-    let qmp_path = &format!("/tmp/circe-qmp-{}", chall.container_name);
+    let qmp_path = &format!("/tmp/circe-qmp-{}", chall.name);
 
     // delete stale socket files
     let _ = std::fs::remove_file(&qmp_path);
@@ -64,16 +59,19 @@ fn main() -> Result<(), Error> {
         .args(["-kernel", "out/kernel-image"])
         .args(["-initrd", "out/initramfs.cpio"])
         .args([
+            "-drive",
+            &format!("file={},if=virtio,readonly=on", &filesystem_path),
+        ])
+        .args([
             "-append",
             &format!(
-                "'earlyprintk=serial,ttyS0,115200 console=ttyS0,115200 {}'",
-                //"' {}'",
+                "'earlyprintk=serial,ttyS0,115200 console=ttyS0,115200 printk.devkmsg=on {}'",
                 format!(
                     "ip={}/{} port={} challenge={}",
                     chall.container_ip,
                     config.network.prefix(),
                     config.listening_port,
-                    chall.container_name
+                    chall.name
                 )
             ),
         ])
@@ -83,7 +81,7 @@ fn main() -> Result<(), Error> {
             "-net",
             &format!(
                 "tap,ifname={}-tap{},script=no,downscript=no",
-                config.bridge_name, chall_number
+                config.bridge_name, chall.name
             ),
         ])
         // ensure we provide sufficient randomness to the VMs
@@ -93,13 +91,13 @@ fn main() -> Result<(), Error> {
             &format!("socket,id=qmp,path={},server=on,wait=off", qmp_path),
         ])
         .args(["-mon", "chardev=qmp,mode=control"])
-        .arg("-nographic")
-        .args([
-            "-serial",
-            &format!("file:/tmp/circe-log-{}", chall.container_name),
-            // we will switch to a pty once we find out how to make that work (again)
-            //"pty",
-        ])
+        //.arg("-nographic")
+        //.args([
+        //    "-serial",
+        //    &format!("file:/tmp/circe-log-{}", chall.container_name),
+        //    // we will switch to a pty once we find out how to make that work (again)
+        //    //"pty",
+        //])
         .spawn()?;
 
     while std::fs::try_exists(qmp_path)? != true {}

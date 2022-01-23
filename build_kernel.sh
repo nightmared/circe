@@ -12,7 +12,7 @@ if [ ! -f "tmp/linux/arch/x86/boot/bzImage" ]; then
 	cp circe_initramfs/kernel-config tmp/linux/.config
 	pushd tmp/linux/
 	git fetch
-	git checkout a763d5a5abd65797aec3dd1bf01fe2ccbec32967
+	git checkout dd81e1c7d5fb126e5fbc5c9e334d7b3ec29a16a0
 	make -j$(nproc)
 	popd
 fi
