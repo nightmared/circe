@@ -3,7 +3,11 @@
 set -ex
 
 export PKG_CONFIG_ALLOW_CROSS=true
-cargo rustc -p circe_initramfs --release --target=x86_64-unknown-linux-musl -- -C target-feature=+crt-static
+BUILD_PROFILE=debug
+
+CARGO_ARGS=""
+[ ${BUILD_PROFILE} = "release" ] && CARGO_ARGS="--release ${CARGO_ARGS}"
+cargo rustc -p circe_initramfs ${CARGO_ARGS} -- -C target-feature=+crt-static
 
 mkdir -p tmp/
 
@@ -23,7 +27,7 @@ fi
 rm -rf out/initramfs
 mkdir -p out/initramfs
 cp -r tmp/busybox/_install/{bin,sbin} out/initramfs/
-cp target/x86_64-unknown-linux-musl/release/circe_initramfs out/initramfs/init
+cp target/${BUILD_PROFILE}/circe_initramfs out/initramfs/init
 
 pushd out/initramfs/
 find . | cpio --create --format=newc > ../initramfs.cpio

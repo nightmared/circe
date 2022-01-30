@@ -1,5 +1,4 @@
 use std::ffi::{CStr, CString};
-use std::net::Ipv4Addr;
 use std::rc::Rc;
 
 use libc::getpwnam;
@@ -237,7 +236,6 @@ pub fn setup_bridge(conf: &Config) -> Result<(), Error> {
         Err(e) => return Err(Error::UnixError(e)),
     };
 
-    // give it an IP address
     interface_set_ip(&conf.bridge_name, conf.network)?;
 
     for chall in conf.challenges.values() {
@@ -251,7 +249,7 @@ pub fn setup_bridge(conf: &Config) -> Result<(), Error> {
             }
         };
 
-        // EBUSY is expected is if the TAP device is already used
+        // EBUSY is expected if the TAP device is already used
         match create_tap(&chall.tap_name, owner_uid) {
             Ok(_) | Err(Errno::EBUSY) => {}
             Err(e) => return Err(Error::UnixError(e)),
@@ -265,7 +263,6 @@ pub fn setup_bridge(conf: &Config) -> Result<(), Error> {
         interface_set_up(&chall.tap_name, true)?;
     }
 
-    // set the interface as UP
     interface_set_up(&conf.bridge_name, true)?;
 
     Ok(())

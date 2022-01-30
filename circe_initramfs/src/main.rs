@@ -1,47 +1,20 @@
+use circe_common::{DockerImageConfig, InitramfsMessage};
 use ipnetwork::Ipv4Network;
+use libc::setenv;
 use nasty_network_ioctls::{interface_set_ip, interface_set_up};
-use nix::fcntl::{readlink, OFlag};
-use nix::mount::{mount, umount, MsFlags};
+use nix::fcntl::OFlag;
+use nix::mount::{mount, MsFlags};
 use nix::sys::stat::Mode;
-use nix::unistd::{chdir, chroot, execve, execvpe, fork, mkdir, setsid, ForkResult};
-use std::convert::Infallible;
+use nix::sys::wait::WaitPidFlag;
+use nix::unistd::{chdir, chroot, execve, execvpe, fork, mkdir, setsid, sleep, ForkResult};
 use std::ffi::NulError;
 use std::ffi::{CStr, CString};
-use std::fs::{create_dir, remove_dir, remove_dir_all, remove_file, File};
-use std::io::Read;
+use std::fs::File;
 use std::net::Ipv4Addr;
 use std::panic::catch_unwind;
 use std::path::Path;
 use std::str::FromStr;
-use std::time::Duration;
 use thiserror::Error;
-
-use serde_derive::Deserialize;
-
-#[derive(Deserialize, Clone, Debug)]
-pub struct DockerImageManifest {
-    #[serde(rename = "Config")]
-    config: String,
-    #[serde(rename = "Layers")]
-    layers: Vec<String>,
-}
-
-#[derive(Deserialize, Clone, Debug)]
-pub struct DockerImageConfig {
-    #[serde(rename = "Cmd")]
-    cmd: Vec<String>,
-    #[serde(rename = "Entrypoint")]
-    entrypoint: Option<Vec<String>>,
-    #[serde(rename = "Env")]
-    env_variables: Vec<String>,
-    #[serde(rename = "WorkingDir")]
-    work_directory: String,
-}
-
-#[derive(Deserialize, Clone, Debug)]
-pub struct DockerImage {
-    config: DockerImageConfig,
-}
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -61,9 +34,7 @@ pub enum Error {
     DockerParsingError(#[from] serde_json::Error),
 }
 
-const TMP_TAR_PATH: &'static str = "/tmp/container_setup";
 const CONTAINER_PATH: &'static str = "/container";
-const ROOTFS_PATH: &'static str = "/container/rootfs";
 
 fn setup_term(kmsg: bool) -> Result<(), Error> {
     let console_fd = nix::fcntl::open(
@@ -86,7 +57,7 @@ fn send_ping(source: Ipv4Addr, gateway: Ipv4Addr) -> ! {
         let res = catch_unwind(|| -> Result<(), Error> {
             let socket = std::net::UdpSocket::bind(std::net::SocketAddrV4::new(source, 999))?;
             socket.connect(std::net::SocketAddrV4::new(gateway, 666))?;
-            socket.send(b"ping")?;
+            socket.send(&serde_json::to_vec(&InitramfsMessage::Ping)?)?;
 
             Ok(())
         });
@@ -97,33 +68,6 @@ fn send_ping(source: Ipv4Addr, gateway: Ipv4Addr) -> ! {
             Err(e) => println!("[x] the ping sender panic()ed: {:?}", e),
         }
     }
-}
-
-fn move_dir(source: impl AsRef<Path>, dest: impl AsRef<Path>) -> Result<(), Error> {
-    let mut dest_dir = dest.as_ref().to_owned();
-    // we strip the prefix otherwise push() **replaces** the path instead of concatenating to it
-    dest_dir.push(source.as_ref().strip_prefix("/").unwrap());
-    std::fs::create_dir(&dest_dir)?;
-
-    for entry in std::fs::read_dir(source.as_ref())? {
-        let entry = entry?;
-
-        let mut new_dest = dest_dir.clone();
-        new_dest.push(entry.file_name());
-
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            move_dir(&entry.path(), &new_dest)?;
-        } else if file_type.is_symlink() {
-            std::os::unix::fs::symlink(readlink(&entry.path())?, &new_dest)?;
-        } else if file_type.is_file() {
-            std::fs::copy(&entry.path(), &new_dest)?;
-        }
-    }
-
-    std::fs::remove_dir_all(source.as_ref())?;
-
-    Ok(())
 }
 
 fn main() -> Result<(), Error> {
@@ -144,54 +88,9 @@ fn main() -> Result<(), Error> {
     )?;
 
     // redirect output to the kernel console (should also appear on the serial device)
-    setup_term(true)?;
+    setup_term(false)?;
 
     println!("[*] Hello and welcome to circe-initramfs");
-
-    println!("[+] copying the content of the initramfs to /newfs");
-
-    // move to a new ramfs, because we cannot pivot_root() on the initramfs, and runc needs it
-    create_dir("/newfs")?;
-    mount(
-        None::<&str>,
-        "/newfs",
-        Some("ramfs"),
-        MsFlags::empty(),
-        None::<&str>,
-    )?;
-
-    move_dir("/bin", "/newfs")?;
-    move_dir("/sbin", "/newfs")?;
-    remove_file("/init")?;
-    remove_dir("/root")?;
-
-    println!("[+] moving /newfs over / to become our new rootfs");
-
-    nix::unistd::close(0)?;
-    nix::unistd::close(1)?;
-    nix::unistd::close(2)?;
-
-    umount("/dev")?;
-    remove_dir_all("/dev")?;
-
-    chdir("/newfs")?;
-
-    mount(Some("."), "/", None::<&str>, MsFlags::MS_MOVE, None::<&str>)?;
-
-    chroot(".")?;
-    chdir("/")?;
-
-    // setup a new /dev mount
-    std::fs::create_dir("/dev")?;
-    mount(
-        Some("devtmpfs"),
-        "/dev",
-        Some("devtmpfs"),
-        MsFlags::empty(),
-        None::<&str>,
-    )?;
-
-    setup_term(true)?;
 
     println!("[+] mounting everything you might expect in a linux system");
 
@@ -222,16 +121,16 @@ fn main() -> Result<(), Error> {
         None::<&str>,
     )?;
     mount(
-        Some("cgroup2"),
-        "/sys/fs/cgroup",
-        Some("cgroup2"),
+        Some("tmpfs"),
+        "/tmp",
+        Some("tmpfs"),
         mount_flags,
         None::<&str>,
     )?;
 
     println!("[+] setting up the network");
 
-    let (ip, challenge, server_port) = {
+    let (ip, challenge, _server_port) = {
         let mut ip = None;
         let mut challenge = None;
         let mut server_port = None;
@@ -258,120 +157,169 @@ fn main() -> Result<(), Error> {
     interface_set_ip("eth0", ip).unwrap();
     interface_set_up("eth0", true).unwrap();
 
-    println!("[+] downloading the container image");
-
     let gateway = ip.nth(1).unwrap();
 
     std::thread::spawn(move || -> ! { send_ping(ip.ip(), gateway) });
 
-    let req_path = format!(
-        "http://{}:{}/challenges/{}/image",
-        gateway, server_port, challenge,
-    );
-    let tar_file = ureq::get(&req_path).call()?;
+    println!("[+] mounting the container image");
 
-    // setup the dirs that will hold the container data
     std::fs::create_dir(CONTAINER_PATH)?;
-    std::fs::create_dir(ROOTFS_PATH)?;
-    // setup the temporary dir for the extraction of the image
-    std::fs::create_dir(TMP_TAR_PATH)?;
+    mount(
+        Some("/dev/vda"),
+        CONTAINER_PATH,
+        Some("squashfs"),
+        MsFlags::MS_RDONLY,
+        None::<&str>,
+    )?;
 
-    println!("[+] extracting the main image");
+    println!("[+] parsing the container configuration");
 
-    {
-        let mut archive = tar::Archive::new(tar_file.into_reader());
-        archive.unpack(TMP_TAR_PATH)?;
-    }
-
-    let manifest = {
-        let res: Vec<DockerImageManifest> =
-            serde_json::from_reader(File::open(&format!("{}/manifest.json", TMP_TAR_PATH))?)?;
-
-        if res.len() != 1 {
-            println!("Couldn't parse the manifest file, did you use a multi-container archive?");
-        }
-
-        res[0].clone()
-    };
-
-    let mut image_config: DockerImage = serde_json::from_reader(File::open(&format!(
-        "{}/{}",
-        TMP_TAR_PATH, manifest.config
+    let mut config: DockerImageConfig = serde_json::from_reader(File::open(&format!(
+        "{}/circe_container_config.json",
+        CONTAINER_PATH
     ))?)?;
 
-    if image_config.config.work_directory == "" {
-        image_config.config.work_directory = String::from("/");
+    if config.work_directory == "" {
+        config.work_directory = String::from("/");
     }
 
-    // extract all the layers in the rootfs folder
-    // IMPORTANT: note that we do not support layer whiteouts for now
-    // (https://github.com/opencontainers/image-spec/blob/main/layer.md#whiteouts),
-    // so we require squashed images
-    for layer_archive in &manifest.layers {
-        println!("[+] extracting the layer {}", layer_archive);
-        let mut archive =
-            tar::Archive::new(File::open(&format!("{}/{}", TMP_TAR_PATH, layer_archive))?);
-        archive.unpack(ROOTFS_PATH)?;
-    }
+    println!("[+] mounting a writable overlay on top of the container");
 
-    // cleanup for keeping our memory footprint as small as possible
-    std::fs::remove_dir_all(TMP_TAR_PATH)?;
+    let container_tmpfs = Path::new("/container_tmpfs").to_owned();
+    std::fs::create_dir(&container_tmpfs)?;
+    mount(
+        Some("none"),
+        &container_tmpfs,
+        Some("tmpfs"),
+        MsFlags::empty(),
+        None::<&str>,
+    )?;
 
-    //if let ForkResult::Child = unsafe { fork()? } {
-    chdir(ROOTFS_PATH)?;
-    chroot(".")?;
-    chdir(Path::new(&image_config.config.work_directory))?;
+    let mut container_upperdir = container_tmpfs.clone();
+    container_upperdir.push("upperdir");
+    std::fs::create_dir(&container_upperdir)?;
+    let mut container_workdir = container_tmpfs.clone();
+    container_workdir.push("workdir");
+    std::fs::create_dir(&container_workdir)?;
+    let mut container_merged = container_tmpfs.clone();
+    container_merged.push("merged");
+    std::fs::create_dir(&container_merged)?;
+    mount(
+        Some("overlay"),
+        &container_merged,
+        Some("overlay"),
+        MsFlags::empty(),
+        Some(
+            format!(
+                "lowerdir={},upperdir={},workdir={}",
+                CONTAINER_PATH,
+                container_upperdir.to_string_lossy(),
+                container_workdir.to_string_lossy()
+            )
+            .as_str(),
+        ),
+    )?;
 
-    setsid()?;
-    //let console_fd = nix::fcntl::open("/logs", OFlag::O_CREAT | OFlag::O_RDWR, Mode::empty())?;
-    //nix::unistd::dup2(console_fd, 0)?;
-    //nix::unistd::dup2(console_fd, 1)?;
-    //nix::unistd::dup2(console_fd, 2)?;
-    //nix::unistd::close(console_fd)?;
+    let container_process = unsafe { fork()? };
+    if let ForkResult::Child = container_process {
+        println!("[+] chrooting inside the container");
+        chdir(&container_merged)?;
+        chroot(".")?;
 
-    println!("[+] chrooted inside the «container»");
+        println!("[+] moving the the directory {}", config.work_directory);
+        chdir(Path::new(&config.work_directory))?;
 
-    let mut cmd = Vec::new();
-    if let Some(v) = image_config.config.entrypoint {
-        for arg in v {
+        println!("[+] switching to the log file");
+        let console_fd = nix::fcntl::open("/logs", OFlag::O_CREAT | OFlag::O_RDWR, Mode::empty())?;
+        nix::unistd::dup2(console_fd, 0)?;
+        nix::unistd::dup2(console_fd, 1)?;
+        nix::unistd::dup2(console_fd, 2)?;
+        nix::unistd::close(console_fd)?;
+        setsid()?;
+
+        let mut cmd = Vec::new();
+        if let Some(v) = config.entrypoint {
+            for arg in v {
+                cmd.push(CString::new(arg)?);
+            }
+        }
+        for arg in config.cmd {
             cmd.push(CString::new(arg)?);
         }
+
+        let mut env: Vec<CString> = config
+            .env_variables
+            .into_iter()
+            .map(|x| CString::new(x))
+            .flatten()
+            .collect();
+        env.push(CString::new(format!("HOSTNAME={}", &challenge))?);
+        env.push(CString::new(format!("PWD={}", &config.work_directory))?);
+
+        println!(
+            "[+] launching the container executable {:?} with environment {:?}",
+            cmd, env
+        );
+
+        // "execvpe() searches for the program using the value of PATH from the caller's environment, not from the envp argument."
+        for val in env.iter() {
+            let split_val: Vec<&[u8]> = val.as_bytes().splitn(2, |&b| b == b'=').collect();
+            if split_val.len() != 2 {
+                println!("Invalid env variable {:?}", val);
+                continue;
+            }
+            if split_val[0] == b"PATH" {
+                unsafe {
+                    setenv(
+                        CString::new("PATH")?.as_ptr(),
+                        split_val[1].as_ptr() as *const i8,
+                        1,
+                    );
+                }
+            }
+        }
+        execvpe(cmd[0].as_c_str(), &cmd, &env)?;
     }
-    for arg in image_config.config.cmd {
-        cmd.push(CString::new(arg)?);
-    }
-
-    println!("[+] launching the «container» with args {:?}", cmd);
-
-    let mut env: Vec<CString> = image_config
-        .config
-        .env_variables
-        .into_iter()
-        .map(|x| CString::new(x))
-        .flatten()
-        .collect();
-    env.push(CString::new(format!("HOSTNAME={}", &challenge))?);
-    env.push(CString::new(format!(
-        "PWD={}",
-        &image_config.config.work_directory
-    ))?);
-
-    execvpe(cmd[0].as_c_str(), &cmd, &env)?;
-    //}
 
     println!("[+] spawing a shell");
 
-    if let ForkResult::Child = unsafe { fork()? } {
-        //setsid()?;
-        //// open the serial device and make it the controlling terminal
-        //setup_term(false)?;
+    let shell_process = unsafe { fork()? };
+    if let ForkResult::Child = shell_process {
+        setsid()?;
+        // open the serial device and make it the controlling terminal
+        setup_term(false)?;
 
         let sh_path = CStr::from_bytes_with_nul(b"/bin/sh\0").unwrap();
         execve(sh_path, &[sh_path], &[] as &[&CStr; 0])?;
     }
 
+    let (container_child, shell_child) = match (container_process, shell_process) {
+        (
+            ForkResult::Parent {
+                child: container_child,
+            },
+            ForkResult::Parent { child: shell_child },
+        ) => (container_child, shell_child),
+        _ => panic!("Couldn't retrieve the PIDs of the forked processes"),
+    };
+
     loop {
-        if let Err(e) = nix::sys::wait::waitpid(nix::unistd::Pid::from_raw(-1), None) {
+        sleep(3);
+
+        // return if any of the two process groups died
+        if let Err(e) = nix::sys::wait::waitpid(
+            nix::unistd::Pid::from_raw(-container_child.as_raw()),
+            Some(WaitPidFlag::WNOHANG),
+        ) {
+            if e == nix::errno::Errno::ECHILD {
+                break;
+            }
+            panic!("{:?}", e);
+        }
+        if let Err(e) = nix::sys::wait::waitpid(
+            nix::unistd::Pid::from_raw(-shell_child.as_raw()),
+            Some(WaitPidFlag::WNOHANG),
+        ) {
             if e == nix::errno::Errno::ECHILD {
                 break;
             }

@@ -3,9 +3,12 @@ name = "circe_common"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+toml_support = ["toml"]
+
 [dependencies]
 serde = "1.0"
 serde_derive = "1.0"
 ipnetwork = "0.18"
-toml = "0.5.8"
+toml = { version = "0.5.8", optional = true }
 thiserror = "1.0"

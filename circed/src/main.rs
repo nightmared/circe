@@ -37,7 +37,7 @@ pub enum Error {
     #[error("Error while manipulating UNIX objects")]
     UnixError(#[from] nix::Error),
 
-    #[error("Error while performing a network Operation")]
+    #[error("Error while performing a network operation")]
     NetworkError(#[source] std::io::Error),
 
     #[error("String contains null bytes")]
@@ -60,46 +60,47 @@ lazy_static! {
     static ref GLOBAL_CONFIG: RwLock<Config> = RwLock::new(Config::default());
 }
 
-/*
 async fn handle_http_query(req: Request<Body>) -> Result<Response<Body>, ServerError> {
     let (parts, _body) = req.into_parts();
     let path = parts.uri.path();
     let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
 
-    if parts.len() == 3 {
-        if parts[0] == "challenges" && parts[2] == "image" {
+    let mut res = Response::new(Body::from("Unknown URL"));
+    *res.status_mut() = StatusCode::NOT_FOUND;
+
+    if parts.len() == 2 {
+        if parts[0] == "challenges" {
             let challenge_name: String = String::from_utf8(
                 parts[1]
                     .bytes()
-                    // sanity/security
+                    // sanity/security (protect against path traversal)
                     .filter(|c| b"abcdefghijklmnopqrstuvwxyz0123456789_-".contains(c))
                     .collect(),
             )
             .unwrap();
-            let mut file_path = GLOBAL_CONFIG.read().await.image_folder.clone();
-            file_path.push(&format!("{}.tar", challenge_name));
-            println!("{:?}", file_path);
+            let conf = GLOBAL_CONFIG.read().await;
+            if conf.challenges.get(&challenge_name).is_none() {
+                *res.body_mut() = Body::from("Unavailable challenge");
+                return Ok(res);
+            }
+            let mut file_path = conf.image_folder.clone();
+            file_path.push(&format!("{}.docker_config.json", challenge_name));
             match tokio::fs::File::open(file_path).await {
                 Ok(fd) => {
                     let body = Body::wrap_stream(ReaderStream::new(BufStream::new(fd)));
                     return Ok(Response::new(body));
                 }
                 Err(_) => {
-                    let mut res = Response::new(Body::from("Unavailable image"));
-
-                    *res.status_mut() = StatusCode::NOT_FOUND;
+                    *res.body_mut() =
+                        Body::from("Couldn't find the docker configuration file for the challenge");
                     return Ok(res);
                 }
             }
         }
     }
-    let mut res = Response::new(Body::from("Unknown URL"));
-
-    *res.status_mut() = StatusCode::NOT_FOUND;
 
     Ok(res)
 }
-*/
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
@@ -111,18 +112,8 @@ async fn main() -> Result<(), Error> {
 
     setup_network(&config)?;
 
-    /*
     let make_service =
         make_service_fn(|_conn| async { Ok::<_, ServerError>(service_fn(handle_http_query)) });
-
-    /*
-    let serve_containers = warp::path("challenges")
-        .and(warp::path::param())
-        .and(warp::path::path("image"))
-        .map(|challenge_name: String| async {
-            warp::fs::file("/tmp/a")
-        });
-        */
 
     let server = Server::bind(&SocketAddr::from((
         config.network.ip(),
@@ -133,7 +124,6 @@ async fn main() -> Result<(), Error> {
     if let Err(e) = server.await {
         eprintln!("server error: {}", e);
     }
-    */
 
     Ok(())
 }

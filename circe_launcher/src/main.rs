@@ -1,7 +1,7 @@
 #![feature(path_try_exists)]
 
 use qapi::Qmp;
-use std::{os::unix::net::UnixStream, process::Command, thread};
+use std::{os::unix::net::UnixStream, process::Command};
 use thiserror::Error;
 
 use circe_common::{load_config, ConfigError};
@@ -57,6 +57,7 @@ fn main() -> Result<(), Error> {
         .arg("-enable-kvm")
         .args(["-cpu", "host"])
         .args(["-kernel", "out/kernel-image"])
+        //.args(["-kernel", "/boot/vmlinuz-5.16.1-1-default"])
         .args(["-initrd", "out/initramfs.cpio"])
         .args([
             "-drive",
@@ -65,7 +66,7 @@ fn main() -> Result<(), Error> {
         .args([
             "-append",
             &format!(
-                "'earlyprintk=serial,ttyS0,115200 console=ttyS0,115200 printk.devkmsg=on {}'",
+                "earlyprintk=serial,ttyS0,115200 console=ttyS0,115200 {}",
                 format!(
                     "ip={}/{} port={} challenge={}",
                     chall.container_ip,
@@ -79,10 +80,7 @@ fn main() -> Result<(), Error> {
         .args(["-net", &format!("nic,model=virtio,macaddr={}", macaddr)])
         .args([
             "-net",
-            &format!(
-                "tap,ifname={}-tap{},script=no,downscript=no",
-                config.bridge_name, chall.name
-            ),
+            &format!("tap,ifname={},script=no,downscript=no", chall.tap_name),
         ])
         // ensure we provide sufficient randomness to the VMs
         .args(["-device", "virtio-rng-pci"])
@@ -91,13 +89,13 @@ fn main() -> Result<(), Error> {
             &format!("socket,id=qmp,path={},server=on,wait=off", qmp_path),
         ])
         .args(["-mon", "chardev=qmp,mode=control"])
-        //.arg("-nographic")
-        //.args([
-        //    "-serial",
-        //    &format!("file:/tmp/circe-log-{}", chall.container_name),
-        //    // we will switch to a pty once we find out how to make that work (again)
-        //    //"pty",
-        //])
+        .arg("-nographic")
+        .args([
+            "-serial",
+            // we will switch to a pty once we find out how to make that work (again)
+            //&format!("file:/tmp/circe-log-{}", chall.name),
+            "pty",
+        ])
         .spawn()?;
 
     while std::fs::try_exists(qmp_path)? != true {}

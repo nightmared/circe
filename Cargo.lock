@@ -139,6 +139,7 @@ dependencies = [
 name = "circe_initramfs"
 version = "0.1.0"
 dependencies = [
+ "circe_common",
  "ipnetwork 0.18.0",
  "libc",
  "nasty_network_ioctls",

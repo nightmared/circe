@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+#[cfg(feature = "toml_support")]
 use std::io::Read;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
@@ -11,6 +12,7 @@ use thiserror::Error;
 pub enum ConfigError {
     #[error("The configuration file couldn't be loaded")]
     IoError(#[from] std::io::Error),
+    #[cfg(feature = "toml_support")]
     #[error("The configuration file couldn't be parsed")]
     ParseError(#[from] toml::de::Error),
 }
@@ -126,6 +128,7 @@ pub struct GeneralInfo {
     pub challenges: Vec<Challenge>,
 }
 
+#[cfg(feature = "toml_support")]
 pub fn load_config() -> Result<Config, ConfigError> {
     // load the configuration
     let mut config_file = std::fs::File::open("config.toml")?;
@@ -134,4 +137,21 @@ pub fn load_config() -> Result<Config, ConfigError> {
 
     let raw: RawConfig = toml::from_str(&config_content)?;
     Ok(Config::from(raw))
+}
+
+#[derive(Deserialize, Clone, Debug)]
+pub struct DockerImageConfig {
+    #[serde(rename = "Cmd")]
+    pub cmd: Vec<String>,
+    #[serde(rename = "Entrypoint")]
+    pub entrypoint: Option<Vec<String>>,
+    #[serde(rename = "Env")]
+    pub env_variables: Vec<String>,
+    #[serde(rename = "WorkingDir")]
+    pub work_directory: String,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub enum InitramfsMessage {
+    Ping,
 }

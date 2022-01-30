@@ -8,5 +8,5 @@ edition = "2021"
 [dependencies]
 thiserror = "1.0"
 ureq = { version = "2.3", default-features = false, features = [] }
-circe_common = { path = "../circe_common" }
+circe_common = { path = "../circe_common", features = ["toml_support"] }
 qapi = { version = "0.8.0", features = [ "qmp" ] }

@@ -15,7 +15,7 @@ serde = "1.0"
 serde_derive = "1.0"
 ipnetwork = "0.18"
 nix = "0.23"
-circe_common = { path = "../circe_common" }
+circe_common = { path = "../circe_common", features = ["toml_support"] }
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.6", features = ["io"] }
 hyper = { version = "0.14", features = ["server", "tcp", "http1", "stream"] }
