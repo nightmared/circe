@@ -1,5 +1,5 @@
 [package]
-name = "circe_launcher"
+name = "circe_cli"
 version = "0.1.0"
 edition = "2021"
 
@@ -7,4 +7,7 @@ edition = "2021"
 thiserror = "1.0"
 ureq = { version = "2.3", default-features = false, features = [] }
 circe_common = { path = "../circe_common", features = ["toml_support"] }
-qapi = { version = "0.8.0", features = [ "qmp" ] }
+clap = "3.0.14"
+serde = "1.0"
+serde_json = "1.0"
+nix = "0.23"

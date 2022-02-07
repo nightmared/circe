@@ -10,14 +10,19 @@ use circe_common::{load_config, ConfigError};
 pub enum Error {
     #[error("I/O operation or OS error")]
     OSError(#[from] std::io::Error),
+
     #[error("Could not perform an HTTP query")]
     QueryError(#[from] ureq::Error),
+
     #[error("Could not load the CIRCE configuration")]
     ConfigurationError(#[from] ConfigError),
+
     #[error("The program was not launched with the right amount of arguments")]
     InvalidArgumentNumber,
+
     #[error("The challenge does not exist")]
     ChallengeDoesNotExist,
+
     #[error("Couldn't communicate with QEMU")]
     QMPError(#[from] qapi::ExecuteError),
 }
@@ -109,10 +114,18 @@ fn main() -> Result<(), Error> {
 
         for dev in qmp.execute(&qapi::qmp::query_chardev {})? {
             if dev.label == "serial0" {
-                println!(
-                    "The serial device is '{}'",
-                    dev.filename, //.splitn(2, ':').skip(1).next().unwrap()
-                );
+                let serial_device = dev.filename.splitn(2, ':').skip(1).next();
+                if let Some(serial_device) = serial_device {
+                    println!("The serial device is '{}'", serial_device);
+                    // notify the server of the serial device path
+                    let _ = ureq::post(&format!(
+                        "http://{}:{}/challenges/{}/serial_device",
+                        config.network.ip(),
+                        config.listening_port,
+                        container_name,
+                    ))
+                    .send(serial_device.as_bytes());
+                }
             }
         }
 

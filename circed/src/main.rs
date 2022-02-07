@@ -1,22 +1,21 @@
 // The network part of this crate is "inspired" from https://raw.githubusercontent.com/mullvad/mullvadvpn-app/d92376b4d1df9b547930c68aa9bae9640ff2a022/talpid-core/src/firewall/linux.rs
+use std::fmt::Debug;
 use std::net::SocketAddr;
-use std::ptr::null;
-use std::sync::atomic::{AtomicPtr, Ordering};
-use std::sync::Once;
-use std::{convert::Infallible, fmt::Debug, sync::Arc};
 
+use circe_common::load_config;
+use circe_common::Config;
+use circe_common::ConfigError;
+use hyper::body::HttpBody;
 use hyper::{
     service::{make_service_fn, service_fn},
     Server,
 };
 use hyper::{Body, Request, Response, StatusCode};
-use lazy_static::lazy_static;
-use tokio::io::{BufReader, BufStream};
-use tokio::sync::RwLock;
+use once_cell::sync::OnceCell;
+use tokio::io::BufStream;
+use tokio::sync::Mutex;
 use tokio_util::io::ReaderStream;
 use tracing::error;
-
-use circe_common::{load_config, Challenge, Config, ConfigError};
 
 mod network;
 use network::{setup_bridge, setup_nat};
@@ -48,7 +47,13 @@ pub enum Error {
 }
 
 #[derive(thiserror::Error, Debug)]
-pub enum ServerError {}
+pub enum ServerError {
+    #[error("The byte array contain non-UTF8 characters")]
+    FromUtf8Error(#[from] std::string::FromUtf8Error),
+
+    #[error("Could not serialize the challenge metadata")]
+    SerializationError(#[from] serde_json::Error),
+}
 
 fn setup_network(conf: &Config) -> Result<(), Error> {
     setup_bridge(&conf)?;
@@ -56,33 +61,44 @@ fn setup_network(conf: &Config) -> Result<(), Error> {
     setup_nat(&conf)
 }
 
-lazy_static! {
-    static ref GLOBAL_CONFIG: RwLock<Config> = RwLock::new(Config::default());
-}
+static GLOBAL_CONFIG: OnceCell<Mutex<Config>> = OnceCell::new();
 
 async fn handle_http_query(req: Request<Body>) -> Result<Response<Body>, ServerError> {
-    let (parts, _body) = req.into_parts();
+    let (parts, mut body) = req.into_parts();
     let path = parts.uri.path();
-    let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let uri_parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
 
     let mut res = Response::new(Body::from("Unknown URL"));
     *res.status_mut() = StatusCode::NOT_FOUND;
 
-    if parts.len() == 2 {
-        if parts[0] == "challenges" {
-            let challenge_name: String = String::from_utf8(
-                parts[1]
-                    .bytes()
-                    // sanity/security (protect against path traversal)
-                    .filter(|c| b"abcdefghijklmnopqrstuvwxyz0123456789_-".contains(c))
-                    .collect(),
-            )
-            .unwrap();
-            let conf = GLOBAL_CONFIG.read().await;
-            if conf.challenges.get(&challenge_name).is_none() {
-                *res.body_mut() = Body::from("Unavailable challenge");
-                return Ok(res);
-            }
+    // no router for us
+    if uri_parts.len() != 3 || uri_parts[0] != "challenges" {
+        return Ok(res);
+    }
+
+    let challenge_name: String = String::from_utf8(
+        uri_parts[1]
+            .bytes()
+            // sanity/security (protect against path traversal)
+            .filter(|c| b"abcdefghijklmnopqrstuvwxyz0123456789_-".contains(c))
+            .collect(),
+    )
+    .unwrap();
+    let mut conf = GLOBAL_CONFIG
+        .get()
+        .expect("the global configuration is not initialized")
+        .lock()
+        .await;
+    let chall = match conf.challenges.get_mut(&challenge_name) {
+        Some(x) => x,
+        None => {
+            *res.body_mut() = Body::from("Unavailable challenge");
+            return Ok(res);
+        }
+    };
+
+    match uri_parts[2] {
+        "docker_config" => {
             let mut file_path = conf.image_folder.clone();
             file_path.push(&format!("{}.docker_config.json", challenge_name));
             match tokio::fs::File::open(file_path).await {
@@ -97,6 +113,21 @@ async fn handle_http_query(req: Request<Body>) -> Result<Response<Body>, ServerE
                 }
             }
         }
+        "config" => {
+            let body = Body::from(serde_json::to_vec(chall)?);
+            return Ok(Response::new(body));
+        }
+        "serial_device" => {
+            if let Some(Ok(dev)) = body.data().await {
+                let serial_pts = String::from_utf8(dev.to_vec())?;
+                println!(
+                    "{} defined as the pts backend for container image {}",
+                    serial_pts, challenge_name
+                );
+                chall.serial_pts = Some(serial_pts);
+            }
+        }
+        _ => {}
     }
 
     Ok(res)
@@ -108,7 +139,7 @@ async fn main() -> Result<(), Error> {
     tracing_subscriber::fmt::init();
 
     let config = load_config()?;
-    *GLOBAL_CONFIG.write().await = config.clone();
+    GLOBAL_CONFIG.set(Mutex::new(config.clone())).unwrap();
 
     setup_network(&config)?;
 

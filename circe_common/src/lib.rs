@@ -57,20 +57,6 @@ pub struct Config {
     pub challenges: HashMap<String, Challenge>,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Config {
-            network: Ipv4Network::new(Ipv4Addr::new(127, 0, 0, 1), 32).unwrap(),
-            bridge_name: String::new(),
-            listening_port: 0,
-            user: String::new(),
-            src_folder: PathBuf::new(),
-            image_folder: PathBuf::new(),
-            challenges: HashMap::new(),
-        }
-    }
-}
-
 impl From<RawConfig> for Config {
     fn from(raw: RawConfig) -> Self {
         let mut challs = HashMap::with_capacity(raw.challenges.len());

@@ -7,6 +7,7 @@ use nasty_network_ioctls::{
     interface_set_up, set_alias_to_interface,
 };
 use nix::errno::Errno;
+use once_cell::sync::Lazy;
 use rustables::expr::{
     Bitwise, Cmp, CmpOp, Conntrack, Counter, Immediate, Ipv4HeaderField, Meta, Nat, NatType,
     NetworkHeaderField, Payload, Register, States, TcpHeaderField, TransportHeaderField, Verdict,
@@ -18,14 +19,12 @@ use crate::ruleset::VirtualRuleset;
 use crate::Error;
 use circe_common::{Challenge, Config};
 
-lazy_static::lazy_static! {
-    static ref FILTER_TABLE_NAME: CString = CString::new("filter").unwrap();
-    static ref INPUT_CHAIN_NAME: CString = CString::new("input").unwrap();
-    static ref OUTPUT_CHAIN_NAME: CString = CString::new("output").unwrap();
-    static ref FORWARD_CHAIN_NAME: CString = CString::new("forward").unwrap();
-    static ref NAT_TABLE_NAME: CString = CString::new("nat").unwrap();
-    static ref PREROUTING_CHAIN_NAME: CString = CString::new("prerouting").unwrap();
-}
+static FILTER_TABLE_NAME: Lazy<CString> = Lazy::new(|| CString::new("filter").unwrap());
+//static INPUT_CHAIN_NAME: Lazy<CString> = Lazy::new(|| CString::new("input").unwrap());
+static OUTPUT_CHAIN_NAME: Lazy<CString> = Lazy::new(|| CString::new("output").unwrap());
+static FORWARD_CHAIN_NAME: Lazy<CString> = Lazy::new(|| CString::new("forward").unwrap());
+static NAT_TABLE_NAME: Lazy<CString> = Lazy::new(|| CString::new("nat").unwrap());
+static PREROUTING_CHAIN_NAME: Lazy<CString> = Lazy::new(|| CString::new("prerouting").unwrap());
 
 fn get_or_create_rule(
     ruleset: &mut VirtualRuleset,

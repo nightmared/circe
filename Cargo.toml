@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "circed",
     "circe_common",
+    "circe_cli",
     "circe_initramfs",
     "circe_launcher",
     "circe_save"

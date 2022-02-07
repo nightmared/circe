@@ -6,13 +6,14 @@ edition = "2018"
 [dependencies]
 rustables = { path = "../deps/rustables", features = [ "query" ] }
 nasty_network_ioctls = { path = "../deps/nasty_network_ioctls" }
-lazy_static = "1.4.0"
+once_cell = "1.9.0"
 thiserror = "1.0"
 libc = "0.2"
 tracing = "0.1"
 tracing-subscriber = "0.2"
 serde = "1.0"
 serde_derive = "1.0"
+serde_json = "1.0"
 ipnetwork = "0.18"
 nix = "0.23"
 circe_common = { path = "../circe_common", features = ["toml_support"] }
