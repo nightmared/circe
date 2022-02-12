@@ -1,6 +1,7 @@
 use std::ffi::{CStr, CString};
 use std::rc::Rc;
 
+use ipnetwork::Ipv4Network;
 use libc::getpwnam;
 use nasty_network_ioctls::{
     add_interface_to_bridge, create_bridge, create_tap, interface_id, interface_set_ip,
@@ -78,6 +79,7 @@ fn allow_containers_to_phone_home(
         for (pos, i) in chall.tap_name.bytes().enumerate() {
             name_arr[pos] = i;
         }
+        // allow requests from the VM to the circed server
         get_or_create_rule(
             ruleset,
             ProtoFamily::Ipv4,
@@ -97,7 +99,12 @@ fn allow_containers_to_phone_home(
                 rule.add_expr(&Payload::Network(NetworkHeaderField::Ipv4(
                     Ipv4HeaderField::Daddr,
                 )));
-                rule.add_expr(&Cmp::new(CmpOp::Eq, conf.network.ip()));
+                rule.add_expr(&Cmp::new(
+                    CmpOp::Eq,
+                    conf.network
+                        .nth(1)
+                        .expect("Invalid network: too small to hold the gateway"),
+                ));
                 rule.add_expr(&Payload::Network(NetworkHeaderField::Ipv4(
                     Ipv4HeaderField::Saddr,
                 )));
@@ -105,7 +112,7 @@ fn allow_containers_to_phone_home(
                 Ok(rule.accept())
             },
         )?;
-        // allow established/related packets
+        // allow established/related output packets
         get_or_create_rule(
             ruleset,
             ProtoFamily::Ipv4,
@@ -134,6 +141,7 @@ fn allow_containers_to_phone_home(
 }
 
 fn create_port_forwarding(ruleset: &mut VirtualRuleset, chall: &Challenge) -> Result<(), Error> {
+    // redirect packets received on chall.sources to the challenge
     get_or_create_rule(
         ruleset,
         ProtoFamily::Ipv4,
@@ -153,12 +161,12 @@ fn create_port_forwarding(ruleset: &mut VirtualRuleset, chall: &Challenge) -> Re
                 TcpHeaderField::Dport,
             )));
             rule.add_expr(&Cmp::new(CmpOp::Eq, chall.source_port.to_be()));
-            rule.add_expr(&Immediate::new(chall.container_ip.octets(), Register::Reg1));
-            rule.add_expr(&Immediate::new(chall.destination_port, Register::Reg2));
             rule.add_expr(&Counter {
                 nb_bytes: 0,
                 nb_packets: 0,
             });
+            rule.add_expr(&Immediate::new(chall.container_ip.octets(), Register::Reg1));
+            rule.add_expr(&Immediate::new(chall.destination_port, Register::Reg2));
             rule.add_expr(&Nat {
                 nat_type: NatType::DNat,
                 family: ProtoFamily::Ipv4,
@@ -235,7 +243,15 @@ pub fn setup_bridge(conf: &Config) -> Result<(), Error> {
         Err(e) => return Err(Error::UnixError(e)),
     };
 
-    interface_set_ip(&conf.bridge_name, conf.network)?;
+    let interface_ip = Ipv4Network::new(
+        conf.network
+            .nth(1)
+            .expect("Invalid network: too small to hold the gateway"),
+        conf.network.prefix(),
+    )
+    .unwrap();
+
+    interface_set_ip(&conf.bridge_name, interface_ip)?;
 
     for chall in conf.challenges.values() {
         let owner_uid = unsafe {

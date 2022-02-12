@@ -1,21 +1,31 @@
 #![feature(path_try_exists)]
 
 use qapi::Qmp;
-use std::{os::unix::net::UnixStream, process::Command};
+use std::{
+    net::{SocketAddr, SocketAddrV4},
+    os::unix::net::UnixStream,
+    process::Command,
+};
 use thiserror::Error;
 
-use circe_common::{load_config, ConfigError};
+use circe_common::{
+    load_config, perform_query_without_response, ChallengeQuery, ChallengeQueryKind, CirceQueryRaw,
+    ClientQuery, ConfigError, QueryError,
+};
 
 #[derive(Error, Debug)]
 pub enum Error {
+    #[error("Could not perform a network request")]
+    QueryError(#[from] QueryError),
+
     #[error("I/O operation or OS error")]
     OSError(#[from] std::io::Error),
 
-    #[error("Could not perform an HTTP query")]
-    QueryError(#[from] ureq::Error),
-
     #[error("Could not load the CIRCE configuration")]
     ConfigurationError(#[from] ConfigError),
+
+    #[error("Could not serialize requests")]
+    SerializationError(#[from] serde_json::Error),
 
     #[error("The program was not launched with the right amount of arguments")]
     InvalidArgumentNumber,
@@ -34,9 +44,9 @@ fn main() -> Result<(), Error> {
     if args.len() != 2 {
         return Err(Error::InvalidArgumentNumber);
     }
-    let container_name = args.skip(1).next().unwrap();
+    let challenge_name = args.skip(1).next().unwrap();
 
-    let chall = match config.challenges.get(&container_name) {
+    let chall = match config.challenges.get(&challenge_name) {
         Some(x) => x,
         None => return Err(Error::ChallengeDoesNotExist),
     };
@@ -118,13 +128,18 @@ fn main() -> Result<(), Error> {
                 if let Some(serial_device) = serial_device {
                     println!("The serial device is '{}'", serial_device);
                     // notify the server of the serial device path
-                    let _ = ureq::post(&format!(
-                        "http://{}:{}/challenges/{}/serial_device",
-                        config.network.ip(),
-                        config.listening_port,
-                        container_name,
-                    ))
-                    .send(serial_device.as_bytes());
+                    perform_query_without_response(
+                        &SocketAddr::V4(SocketAddrV4::new(
+                            config.network.nth(1).unwrap(),
+                            config.listening_port,
+                        )),
+                        CirceQueryRaw::Challenge(ChallengeQuery {
+                            kind: ChallengeQueryKind::Client(ClientQuery::SetSerialTerminal(
+                                serial_device.to_string(),
+                            )),
+                            challenge_name: challenge_name.clone(),
+                        }),
+                    )?;
                 }
             }
         }

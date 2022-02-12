@@ -1,36 +1,32 @@
-use std::ffi::CStr;
+use std::net::SocketAddr;
+use std::net::SocketAddrV4;
+use std::process::Command;
 
 use circe_common::load_config;
 use circe_common::Challenge;
+use circe_common::ChallengeQuery;
+use circe_common::ChallengeQueryKind;
+use circe_common::CirceQueryRaw;
+use circe_common::CirceResponseData;
+use circe_common::ClientQuery;
 use circe_common::ConfigError;
+use circe_common::QueryError;
 
+use circe_common::perform_authenticated_query;
 use clap::App;
 use clap::Arg;
-use nix::unistd::execvp;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum Error {
-    #[error("I/O operation or OS error")]
-    OSError(#[from] std::io::Error),
-
-    #[error("Could not perform an HTTP query")]
-    QueryError(#[from] ureq::Error),
-
-    #[error("Could not deserialize the challenge metadata")]
-    DeserializationError(#[from] serde_json::Error),
+    #[error("Could not perform a network request")]
+    QueryError(#[from] QueryError),
 
     #[error("Could not load the CIRCE configuration")]
     ConfigurationError(#[from] ConfigError),
 
-    #[error("The challenge does not exist")]
-    ChallengeDoesNotExist,
-
     #[error("This challenge does not have a PTS yet, maybe it is not started ?")]
     NoPtsDefined,
-
-    #[error("Could not convert some string to a CStr")]
-    FFIError(#[from] std::ffi::FromBytesWithNulError),
 }
 
 fn main() -> Result<(), Error> {
@@ -53,33 +49,26 @@ fn main() -> Result<(), Error> {
         let challenge_name = submatch.value_of("challenge_name").unwrap();
 
         // query the serial_pts status of the challenge
-        let chall_data = serde_json::from_reader::<_, Challenge>(
-            ureq::get(&format!(
-                "http://{}:{}/challenges/{}/config",
-                config.network.ip(),
+        if let CirceResponseData::ChallengeMetadata(Challenge {
+            serial_pts: Some(pts_path),
+            ..
+        }) = perform_authenticated_query(
+            &SocketAddr::V4(SocketAddrV4::new(
+                config.network.nth(1).unwrap(),
                 config.listening_port,
-                challenge_name
-            ))
-            .call()?
-            .into_reader(),
-        )?;
-
-        match chall_data.serial_pts {
-            Some(pts) => {
-                let mut pts = pts.into_bytes();
-                pts.push(b'\0');
-
-                execvp(
-                    CStr::from_bytes_with_nul(b"minicom\0")?,
-                    &[
-                        CStr::from_bytes_with_nul(b"minicom\0")?,
-                        CStr::from_bytes_with_nul(b"-D\0")?,
-                        CStr::from_bytes_with_nul(pts.as_slice())?,
-                    ],
-                )
+            )),
+            CirceQueryRaw::Challenge(ChallengeQuery {
+                kind: ChallengeQueryKind::Client(ClientQuery::RetrieveChallengeMetadata),
+                challenge_name: challenge_name.to_string(),
+            }),
+            config.symmetric_key,
+        )? {
+            Command::new("minicom")
+                .args(&["-D", pts_path.as_str()])
+                .status()
                 .expect("Couldn't launch minicon");
-            }
-            None => return Err(Error::NoPtsDefined),
+        } else {
+            return Err(Error::NoPtsDefined);
         }
     }
 

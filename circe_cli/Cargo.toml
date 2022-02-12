@@ -5,9 +5,7 @@ edition = "2021"
 
 [dependencies]
 thiserror = "1.0"
-ureq = { version = "2.3", default-features = false, features = [] }
 circe_common = { path = "../circe_common", features = ["toml_support"] }
 clap = "3.0.14"
 serde = "1.0"
 serde_json = "1.0"
-nix = "0.23"

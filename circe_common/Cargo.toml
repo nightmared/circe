@@ -5,6 +5,7 @@ edition = "2021"
 
 [features]
 toml_support = ["toml"]
+net = ["serde_json"]
 
 [dependencies]
 serde = "1.0"
@@ -12,3 +13,4 @@ serde_derive = "1.0"
 ipnetwork = "0.18"
 toml = { version = "0.5.8", optional = true }
 thiserror = "1.0"
+serde_json = {version = "1.0", optional = true }

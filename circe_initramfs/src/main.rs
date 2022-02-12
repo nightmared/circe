@@ -1,4 +1,4 @@
-use circe_common::{DockerImageConfig, InitramfsMessage};
+use circe_common::{DockerImageConfig, InitramfsQuery};
 use ipnetwork::Ipv4Network;
 use libc::setenv;
 use nasty_network_ioctls::{interface_set_ip, interface_set_up};
@@ -14,6 +14,7 @@ use std::net::Ipv4Addr;
 use std::panic::catch_unwind;
 use std::path::Path;
 use std::str::FromStr;
+use std::time::Duration;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -52,14 +53,31 @@ fn setup_term(kmsg: bool) -> Result<(), Error> {
     Ok(())
 }
 
-fn send_ping(source: Ipv4Addr, gateway: Ipv4Addr) -> ! {
-    loop {
-        let res = catch_unwind(|| -> Result<(), Error> {
-            let socket = std::net::UdpSocket::bind(std::net::SocketAddrV4::new(source, 999))?;
-            socket.connect(std::net::SocketAddrV4::new(gateway, 666))?;
-            socket.send(&serde_json::to_vec(&InitramfsMessage::Ping)?)?;
+fn send_message_to_manager(
+    challenge_name: &str,
+    gateway: Ipv4Addr,
+    server_port: u16,
+    message: &InitramfsQuery,
+) -> Result<(), Error> {
+    ureq::post(&format!(
+        "http://{}:{}/challenges/{}/initramfs_query",
+        gateway, server_port, challenge_name
+    ))
+    .timeout(Duration::new(1, 0))
+    .send(serde_json::to_vec(message)?.as_slice())?;
 
-            Ok(())
+    Ok(())
+}
+
+fn send_ping(challenge_name: &str, gateway: Ipv4Addr, server_port: u16) -> ! {
+    loop {
+        let res = catch_unwind(|| {
+            send_message_to_manager(
+                challenge_name,
+                gateway,
+                server_port,
+                &InitramfsQuery::ServiceAvailable,
+            )
         });
         std::thread::sleep(std::time::Duration::new(5, 0));
         match res {
@@ -130,7 +148,7 @@ fn main() -> Result<(), Error> {
 
     println!("[+] setting up the network");
 
-    let (ip, challenge, _server_port) = {
+    let (net, challenge, server_port) = {
         let mut ip = None;
         let mut challenge = None;
         let mut server_port = None;
@@ -154,12 +172,13 @@ fn main() -> Result<(), Error> {
         }
     };
 
-    interface_set_ip("eth0", ip).unwrap();
+    interface_set_ip("eth0", net).unwrap();
     interface_set_up("eth0", true).unwrap();
 
-    let gateway = ip.nth(1).unwrap();
+    let gateway = net.nth(1).unwrap();
 
-    std::thread::spawn(move || -> ! { send_ping(ip.ip(), gateway) });
+    let challenge_name = challenge.clone();
+    std::thread::spawn(move || -> ! { send_ping(&challenge_name, gateway, server_port) });
 
     println!("[+] mounting the container image");
 
@@ -304,7 +323,7 @@ fn main() -> Result<(), Error> {
     };
 
     loop {
-        sleep(3);
+        sleep(1);
 
         // return if any of the two process groups died
         if let Err(e) = nix::sys::wait::waitpid(
@@ -326,6 +345,13 @@ fn main() -> Result<(), Error> {
             panic!("{:?}", e);
         }
     }
+
+    send_message_to_manager(
+        &challenge,
+        gateway,
+        server_port,
+        &InitramfsQuery::ShuttingDown,
+    )?;
 
     unsafe { libc::reboot(libc::LINUX_REBOOT_CMD_POWER_OFF) };
     Ok(())
