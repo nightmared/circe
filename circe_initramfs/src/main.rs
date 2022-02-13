@@ -1,36 +1,46 @@
-use circe_common::{DockerImageConfig, InitramfsQuery};
+use std::ffi::NulError;
+use std::ffi::{CStr, CString};
+use std::fs::{remove_file, File};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::panic::catch_unwind;
+use std::path::Path;
+use std::str::FromStr;
+
 use ipnetwork::Ipv4Network;
 use libc::setenv;
-use nasty_network_ioctls::{interface_set_ip, interface_set_up};
+use nasty_network_ioctls::{interface_set_ip, interface_set_up, set_default_route};
 use nix::fcntl::OFlag;
 use nix::mount::{mount, MsFlags};
 use nix::sys::stat::Mode;
 use nix::sys::wait::WaitPidFlag;
 use nix::unistd::{chdir, chroot, execve, execvpe, fork, mkdir, setsid, sleep, ForkResult};
-use std::ffi::NulError;
-use std::ffi::{CStr, CString};
-use std::fs::File;
-use std::net::Ipv4Addr;
-use std::panic::catch_unwind;
-use std::path::Path;
-use std::str::FromStr;
-use std::time::Duration;
 use thiserror::Error;
+
+use circe_common::{
+    perform_query_without_response, ChallengeQuery, ChallengeQueryKind, CirceQueryRaw,
+    DockerImageConfig, InitramfsQuery, QueryError,
+};
 
 #[derive(Error, Debug)]
 pub enum Error {
     #[error("I/O operation or OS error")]
     OSError(#[from] std::io::Error),
+
     #[error("Nix error")]
     NixError(#[from] nix::Error),
+
     #[error("String conversion error")]
     StrError(#[from] NulError),
+
     #[error("Ip network conversion error")]
     IpNetworkError(#[from] ipnetwork::IpNetworkError),
+
     #[error("Cannot parse the cmdline as integer")]
     IntConversionError(#[from] std::num::ParseIntError),
-    #[error("Could not perform an HTTP query")]
-    QueryError(#[from] ureq::Error),
+
+    #[error("Could not perform a query")]
+    QueryError(#[from] QueryError),
+
     #[error("cannot read json files from docker")]
     DockerParsingError(#[from] serde_json::Error),
 }
@@ -57,16 +67,15 @@ fn send_message_to_manager(
     challenge_name: &str,
     gateway: Ipv4Addr,
     server_port: u16,
-    message: &InitramfsQuery,
-) -> Result<(), Error> {
-    ureq::post(&format!(
-        "http://{}:{}/challenges/{}/initramfs_query",
-        gateway, server_port, challenge_name
-    ))
-    .timeout(Duration::new(1, 0))
-    .send(serde_json::to_vec(message)?.as_slice())?;
-
-    Ok(())
+    message: InitramfsQuery,
+) -> Result<(), QueryError> {
+    perform_query_without_response(
+        &SocketAddr::V4(SocketAddrV4::new(gateway, server_port)),
+        CirceQueryRaw::Challenge(ChallengeQuery {
+            kind: ChallengeQueryKind::Initramfs(message),
+            challenge_name: challenge_name.to_string(),
+        }),
+    )
 }
 
 fn send_ping(challenge_name: &str, gateway: Ipv4Addr, server_port: u16) -> ! {
@@ -76,7 +85,7 @@ fn send_ping(challenge_name: &str, gateway: Ipv4Addr, server_port: u16) -> ! {
                 challenge_name,
                 gateway,
                 server_port,
-                &InitramfsQuery::ServiceAvailable,
+                InitramfsQuery::ServiceAvailable,
             )
         });
         std::thread::sleep(std::time::Duration::new(5, 0));
@@ -172,10 +181,12 @@ fn main() -> Result<(), Error> {
         }
     };
 
-    interface_set_ip("eth0", net).unwrap();
-    interface_set_up("eth0", true).unwrap();
+    interface_set_ip("eth0", net)?;
+    interface_set_up("eth0", true)?;
 
     let gateway = net.nth(1).unwrap();
+
+    println!("{:?}", set_default_route(gateway));
 
     let challenge_name = challenge.clone();
     std::thread::spawn(move || -> ! { send_ping(&challenge_name, gateway, server_port) });
@@ -245,7 +256,11 @@ fn main() -> Result<(), Error> {
         chdir(&container_merged)?;
         chroot(".")?;
 
-        println!("[+] moving the the directory {}", config.work_directory);
+        // remove /circe_container_config.json from the container
+        println!("[+] removing circe files from the container rootfs");
+        remove_file("/circe_container_config.json")?;
+
+        println!("[+] moving to the directory {}", config.work_directory);
         chdir(Path::new(&config.work_directory))?;
 
         println!("[+] switching to the log file");
@@ -350,7 +365,7 @@ fn main() -> Result<(), Error> {
         &challenge,
         gateway,
         server_port,
-        &InitramfsQuery::ShuttingDown,
+        InitramfsQuery::ShuttingDown,
     )?;
 
     unsafe { libc::reboot(libc::LINUX_REBOOT_CMD_POWER_OFF) };

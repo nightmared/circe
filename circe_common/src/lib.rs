@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-#[cfg(feature = "toml_support")]
+#[cfg(any(feature = "toml_support", feature = "net"))]
 use std::io::Read;
 #[cfg(feature = "net")]
 use std::io::Write;

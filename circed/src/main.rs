@@ -29,8 +29,6 @@ use tracing::error;
 mod network;
 use network::{setup_bridge, setup_nat};
 
-mod ruleset;
-
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("Query error")]
@@ -224,8 +222,6 @@ async fn handle_query(sock: &mut TcpStream, remote: SocketAddr) -> Result<(), Se
 
 async fn handle_query_wrapper(mut sock: TcpStream, remote: SocketAddr) -> Result<(), ServerError> {
     let res = handle_query(&mut sock, remote).await;
-
-    println!("{:?}", res);
 
     sock.shutdown().await?;
 

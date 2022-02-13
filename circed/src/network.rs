@@ -1,4 +1,6 @@
-use std::ffi::{CStr, CString};
+use std::ffi::CString;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::rc::Rc;
 
 use ipnetwork::Ipv4Network;
@@ -13,209 +15,163 @@ use rustables::expr::{
     Bitwise, Cmp, CmpOp, Conntrack, Counter, Immediate, Ipv4HeaderField, Meta, Nat, NatType,
     NetworkHeaderField, Payload, Register, States, TcpHeaderField, TransportHeaderField, Verdict,
 };
-use rustables::{Batch, Chain, ProtoFamily, Rule, RuleMethods, Table};
+use rustables::query::send_batch;
+use rustables::{list_tables, Batch, Chain, MsgType, ProtoFamily, Rule, RuleMethods, Table};
 use tracing::error;
 
-use crate::ruleset::VirtualRuleset;
 use crate::Error;
 use circe_common::{Challenge, Config};
 
-static FILTER_TABLE_NAME: Lazy<CString> = Lazy::new(|| CString::new("filter").unwrap());
-//static INPUT_CHAIN_NAME: Lazy<CString> = Lazy::new(|| CString::new("input").unwrap());
-static OUTPUT_CHAIN_NAME: Lazy<CString> = Lazy::new(|| CString::new("output").unwrap());
-static FORWARD_CHAIN_NAME: Lazy<CString> = Lazy::new(|| CString::new("forward").unwrap());
-static NAT_TABLE_NAME: Lazy<CString> = Lazy::new(|| CString::new("nat").unwrap());
-static PREROUTING_CHAIN_NAME: Lazy<CString> = Lazy::new(|| CString::new("prerouting").unwrap());
+static FILTER_TABLE_NAME: Lazy<CString> = Lazy::new(|| CString::new("circe_filter").unwrap());
+static INPUT_CHAIN_NAME: Lazy<CString> = Lazy::new(|| CString::new("circe_input").unwrap());
+static OUTPUT_CHAIN_NAME: Lazy<CString> = Lazy::new(|| CString::new("circe_output").unwrap());
+static FORWARD_CHAIN_NAME: Lazy<CString> = Lazy::new(|| CString::new("circe_forward").unwrap());
+static NAT_TABLE_NAME: Lazy<CString> = Lazy::new(|| CString::new("circe_nat").unwrap());
+static PREROUTING_CHAIN_NAME: Lazy<CString> =
+    Lazy::new(|| CString::new("circe_prerouting").unwrap());
+static POSTROUTING_CHAIN_NAME: Lazy<CString> =
+    Lazy::new(|| CString::new("circe_postrouting").unwrap());
 
-fn get_or_create_rule(
-    ruleset: &mut VirtualRuleset,
-    family: ProtoFamily,
-    table_name: impl AsRef<CStr>,
-    cb_table: impl Fn(&mut Table) -> Result<(), Error>,
-    chain_name: impl AsRef<CStr>,
-    cb_chain: impl Fn(&mut Chain) -> Result<(), Error>,
-    cb_rule: impl Fn(Rule) -> Result<Rule, Error>,
-) -> Result<(), Error> {
-    let table = match ruleset.get_table(table_name.as_ref(), family) {
-        Some(v) => v,
-        None => {
-            let mut table = Table::new(&table_name.as_ref(), family);
-
-            cb_table(&mut table)?;
-
-            ruleset.add_table(Rc::new(table))?
-        }
-    };
-
-    let chain = match table.get_chain(chain_name.as_ref()) {
-        Some(v) => v,
-        None => {
-            let mut chain = Chain::new(&chain_name.as_ref(), table.table.clone());
-
-            cb_chain(&mut chain)?;
-
-            table.add_chain(Rc::new(chain))?
-        }
-    };
-
-    let rule = cb_rule(Rule::new(chain.chain.clone()))?;
-
-    if let Err(e) = chain.add_rule(Rc::new(rule)) {
-        match e {
-            Error::AlreadyExistsError => {}
-            _ => return Err(e),
-        }
-    }
-
-    Ok(())
-}
-
-fn allow_containers_to_phone_home(
-    ruleset: &mut VirtualRuleset,
-    conf: &Config,
-) -> Result<(), Error> {
+fn allow_containers_to_phone_home(batch: &mut Batch, input: Rc<Chain>, conf: &Config) {
     for chall in conf.challenges.values() {
         let mut name_arr = [0u8; libc::IFNAMSIZ];
         for (pos, i) in chall.tap_name.bytes().enumerate() {
             name_arr[pos] = i;
         }
-        // allow requests from the VM to the circed server
-        get_or_create_rule(
-            ruleset,
-            ProtoFamily::Ipv4,
-            FILTER_TABLE_NAME.as_ref(),
-            |_table| Ok(()),
-            OUTPUT_CHAIN_NAME.as_ref(),
-            |_chain| Ok(()),
-            |mut rule| {
-                rule.add_expr(&Meta::IifName);
-                rule.add_expr(&Cmp::new(CmpOp::Eq, name_arr.as_ref()));
-                rule.add_expr(&Meta::L4Proto);
-                rule.add_expr(&Cmp::new(CmpOp::Eq, libc::IPPROTO_TCP as u8));
-                rule.add_expr(&Payload::Transport(TransportHeaderField::Tcp(
-                    TcpHeaderField::Dport,
-                )));
-                rule.add_expr(&Cmp::new(CmpOp::Eq, conf.listening_port.to_be()));
-                rule.add_expr(&Payload::Network(NetworkHeaderField::Ipv4(
-                    Ipv4HeaderField::Daddr,
-                )));
-                rule.add_expr(&Cmp::new(
-                    CmpOp::Eq,
-                    conf.network
-                        .nth(1)
-                        .expect("Invalid network: too small to hold the gateway"),
-                ));
-                rule.add_expr(&Payload::Network(NetworkHeaderField::Ipv4(
-                    Ipv4HeaderField::Saddr,
-                )));
-                rule.add_expr(&Cmp::new(CmpOp::Eq, chall.container_ip));
-                Ok(rule.accept())
-            },
-        )?;
-        // allow established/related output packets
-        get_or_create_rule(
-            ruleset,
-            ProtoFamily::Ipv4,
-            FILTER_TABLE_NAME.as_ref(),
-            |_table| Ok(()),
-            OUTPUT_CHAIN_NAME.as_ref(),
-            |chain| {
-                chain.set_type(rustables::ChainType::Filter);
-                Ok(())
-            },
-            |mut rule| {
-                rule.add_expr(&Meta::IifName);
-                rule.add_expr(&Cmp::new(CmpOp::Eq, name_arr.as_ref()));
-                rule.add_expr(&Meta::L4Proto);
-                rule.add_expr(&Cmp::new(CmpOp::Eq, libc::IPPROTO_TCP as u8));
-                rule.add_expr(&Conntrack::State);
-                let allowed_states = (States::ESTABLISHED | States::RELATED).bits();
-                rule.add_expr(&Bitwise::new(allowed_states, 0u32));
-                rule.add_expr(&Cmp::new(CmpOp::Neq, 0u32));
-                Ok(rule.accept())
-            },
-        )?;
+
+        // allow requests from the VM instances to the circed server
+        let mut rule = Rule::new(input.clone());
+        rule.add_expr(&Meta::IifName);
+        rule.add_expr(&Cmp::new(CmpOp::Eq, name_arr.as_ref()));
+        rule.add_expr(&Meta::L4Proto);
+        rule.add_expr(&Cmp::new(CmpOp::Eq, libc::IPPROTO_TCP as u8));
+        rule.add_expr(&Payload::Transport(TransportHeaderField::Tcp(
+            TcpHeaderField::Dport,
+        )));
+        rule.add_expr(&Cmp::new(CmpOp::Eq, conf.listening_port.to_be()));
+        rule.add_expr(&Payload::Network(NetworkHeaderField::Ipv4(
+            Ipv4HeaderField::Daddr,
+        )));
+        rule.add_expr(&Cmp::new(
+            CmpOp::Eq,
+            conf.network
+                .nth(1)
+                .expect("Invalid network: too small to hold the gateway"),
+        ));
+        rule.add_expr(&Payload::Network(NetworkHeaderField::Ipv4(
+            Ipv4HeaderField::Saddr,
+        )));
+        rule.add_expr(&Cmp::new(CmpOp::Eq, chall.container_ip));
+        batch.add(&rule.accept(), MsgType::Add);
+    }
+}
+
+fn create_port_forwarding(batch: &mut Batch, prerouting: Rc<Chain>, chall: &Challenge) {
+    // redirect packets received on chall.sources to the challenge
+    let mut rule = Rule::new(prerouting);
+    rule.add_expr(&Meta::L4Proto);
+    // L4Proto returns a single byte
+    rule.add_expr(&Cmp::new(CmpOp::Eq, libc::IPPROTO_TCP as u8));
+    rule.add_expr(&Payload::Transport(TransportHeaderField::Tcp(
+        TcpHeaderField::Dport,
+    )));
+    rule.add_expr(&Cmp::new(CmpOp::Eq, chall.source_port.to_be()));
+    rule.add_expr(&Counter {
+        nb_bytes: 0,
+        nb_packets: 0,
+    });
+    rule.add_expr(&Immediate::new(chall.container_ip.octets(), Register::Reg1));
+    rule.add_expr(&Immediate::new(
+        chall.destination_port.to_be(),
+        Register::Reg2,
+    ));
+    rule.add_expr(&Nat {
+        nat_type: NatType::DNat,
+        family: ProtoFamily::Ipv4,
+        ip_register: Register::Reg1,
+        port_register: Some(Register::Reg2),
+    });
+    batch.add(&rule, MsgType::Add);
+}
+
+fn disable_arbitrary_forwarding(batch: &mut Batch, forward: Rc<Chain>, interface_name: &str) {
+    let mut name_arr = [0u8; libc::IFNAMSIZ];
+    for (pos, i) in interface_name.bytes().enumerate() {
+        name_arr[pos] = i;
     }
 
-    Ok(())
-}
+    // allow established/related output packets
+    let mut rule = Rule::new(forward.clone());
+    rule.add_expr(&Meta::IifName);
+    rule.add_expr(&Cmp::new(CmpOp::Eq, name_arr.as_ref()));
+    rule.add_expr(&Meta::L4Proto);
+    rule.add_expr(&Cmp::new(CmpOp::Eq, libc::IPPROTO_TCP as u8));
+    rule.add_expr(&Conntrack::State);
+    let allowed_states = (States::ESTABLISHED | States::RELATED).bits();
+    rule.add_expr(&Bitwise::new(allowed_states, 0u32));
+    rule.add_expr(&Cmp::new(CmpOp::Neq, 0u32));
+    batch.add(&rule.accept(), MsgType::Add);
 
-fn create_port_forwarding(ruleset: &mut VirtualRuleset, chall: &Challenge) -> Result<(), Error> {
-    // redirect packets received on chall.sources to the challenge
-    get_or_create_rule(
-        ruleset,
-        ProtoFamily::Ipv4,
-        NAT_TABLE_NAME.as_ref(),
-        |_table| Ok(()),
-        PREROUTING_CHAIN_NAME.as_ref(),
-        |chain| {
-            chain.set_type(rustables::ChainType::Nat);
-            chain.set_hook(rustables::Hook::PreRouting, -100i32);
-            Ok(())
-        },
-        |mut rule| {
-            rule.add_expr(&Meta::L4Proto);
-            // L4Proto returns a single byte
-            rule.add_expr(&Cmp::new(CmpOp::Eq, libc::IPPROTO_TCP as u8));
-            rule.add_expr(&Payload::Transport(TransportHeaderField::Tcp(
-                TcpHeaderField::Dport,
-            )));
-            rule.add_expr(&Cmp::new(CmpOp::Eq, chall.source_port.to_be()));
-            rule.add_expr(&Counter {
-                nb_bytes: 0,
-                nb_packets: 0,
-            });
-            rule.add_expr(&Immediate::new(chall.container_ip.octets(), Register::Reg1));
-            rule.add_expr(&Immediate::new(chall.destination_port, Register::Reg2));
-            rule.add_expr(&Nat {
-                nat_type: NatType::DNat,
-                family: ProtoFamily::Ipv4,
-                ip_register: Register::Reg1,
-                port_register: Some(Register::Reg2),
-            });
-            Ok(rule)
-        },
-    )
-}
+    let mut rule = Rule::new(forward.clone());
+    rule.add_expr(&Meta::IifName);
+    rule.add_expr(&Cmp::new(CmpOp::Eq, name_arr.as_ref()));
+    rule.add_expr(&Counter::new());
+    rule.add_expr(&Verdict::Drop);
+    batch.add(&rule, MsgType::Add);
 
-fn disable_arbitrary_forwarding(
-    ruleset: &mut VirtualRuleset,
-    interface_name: &str,
-) -> Result<(), Error> {
-    get_or_create_rule(
-        ruleset,
-        ProtoFamily::Ipv4,
-        FILTER_TABLE_NAME.as_ref(),
-        |_table| Ok(()),
-        FORWARD_CHAIN_NAME.as_ref(),
-        |chain| {
-            chain.set_type(rustables::ChainType::Filter);
-            Ok(())
-        },
-        |mut rule| {
-            let mut name_arr = [0u8; libc::IFNAMSIZ];
-            for (pos, i) in interface_name.bytes().enumerate() {
-                name_arr[pos] = i;
-            }
-            rule.add_expr(&Meta::IifName);
-            rule.add_expr(&Cmp::new(CmpOp::Eq, name_arr.as_ref()));
-            rule.add_expr(&Counter::new());
-            rule.add_expr(&Verdict::Drop);
-            Ok(rule)
-        },
-    )
+    let mut rule = Rule::new(forward);
+    rule.add_expr(&Counter::new());
+    rule.add_expr(&Verdict::Accept);
+    batch.add(&rule, MsgType::Add);
 }
 
 pub fn setup_nat(conf: &Config) -> Result<(), Error> {
-    let userdata = CString::new(conf.bridge_name.as_str())?;
-    let mut ruleset = VirtualRuleset::new(userdata.clone())?;
-    ruleset.reload_state_from_system()?;
+    enable_forwarding()?;
 
     // atomic nftables configuration
     let mut batch = Batch::new();
-    ruleset.delete_overlay(&mut batch)?;
 
-    let mut ruleset = VirtualRuleset::new(userdata)?;
+    // delete existing tables
+    for table in list_tables()? {
+        if table.get_name() == NAT_TABLE_NAME.as_ref()
+            || table.get_name() == FILTER_TABLE_NAME.as_ref()
+        {
+            batch.add(&table, rustables::MsgType::Del);
+        }
+    }
+
+    let filter_table = Rc::new(Table::new(&FILTER_TABLE_NAME.as_ref(), ProtoFamily::Ipv4));
+    batch.add(&filter_table, MsgType::Add);
+    let mut forward_chain = Chain::new(&FORWARD_CHAIN_NAME.as_ref(), filter_table.clone());
+    forward_chain.set_type(rustables::ChainType::Filter);
+    forward_chain.set_hook(rustables::Hook::Forward, -5i32);
+    // disable forwarding by default
+    forward_chain.set_policy(rustables::Policy::Drop);
+    batch.add(&forward_chain, MsgType::Add);
+    let forward_chain = Rc::new(forward_chain);
+    let mut input_chain = Chain::new(&INPUT_CHAIN_NAME.as_ref(), filter_table.clone());
+    input_chain.set_type(rustables::ChainType::Filter);
+    input_chain.set_hook(rustables::Hook::In, -5i32);
+    batch.add(&input_chain, MsgType::Add);
+    let input_chain = Rc::new(input_chain);
+    let mut output_chain = Chain::new(&OUTPUT_CHAIN_NAME.as_ref(), filter_table);
+    output_chain.set_type(rustables::ChainType::Filter);
+    output_chain.set_hook(rustables::Hook::Out, -5i32);
+    batch.add(&output_chain, MsgType::Add);
+    let output_chain = Rc::new(output_chain);
+
+    let nat_table = Rc::new(Table::new(&NAT_TABLE_NAME.as_ref(), ProtoFamily::Ipv4));
+    batch.add(&nat_table, MsgType::Add);
+    let mut prerouting_chain = Chain::new(&PREROUTING_CHAIN_NAME.as_ref(), nat_table.clone());
+    prerouting_chain.set_type(rustables::ChainType::Nat);
+    prerouting_chain.set_hook(rustables::Hook::PreRouting, -100i32);
+    batch.add(&prerouting_chain, MsgType::Add);
+    let mut postrouting_chain = Chain::new(&POSTROUTING_CHAIN_NAME.as_ref(), nat_table);
+    postrouting_chain.set_type(rustables::ChainType::Nat);
+    postrouting_chain.set_hook(rustables::Hook::PostRouting, 100i32);
+    batch.add(&postrouting_chain, MsgType::Add);
+    let prerouting_chain = Rc::new(prerouting_chain);
+
     for chall in conf.challenges.values() {
         if !conf.network.contains(chall.container_ip) {
             error!(
@@ -224,15 +180,16 @@ pub fn setup_nat(conf: &Config) -> Result<(), Error> {
             );
             continue;
         }
-        create_port_forwarding(&mut ruleset, chall)?;
+        create_port_forwarding(&mut batch, prerouting_chain.clone(), chall);
     }
 
-    allow_containers_to_phone_home(&mut ruleset, &conf)?;
+    allow_containers_to_phone_home(&mut batch, input_chain, &conf);
 
-    disable_arbitrary_forwarding(&mut ruleset, &conf.bridge_name)?;
+    disable_arbitrary_forwarding(&mut batch, forward_chain, &conf.bridge_name);
 
-    ruleset.apply_overlay(&mut batch)?;
-    ruleset.commit(batch)?;
+    if let Some(mut batch) = batch.finalize() {
+        send_batch(&mut batch)?;
+    }
 
     Ok(())
 }
@@ -279,6 +236,16 @@ pub fn setup_bridge(conf: &Config) -> Result<(), Error> {
     }
 
     interface_set_up(&conf.bridge_name, true)?;
+
+    Ok(())
+}
+
+pub fn enable_forwarding() -> Result<(), std::io::Error> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .open("/proc/sys/net/ipv4/conf/all/forwarding")?;
+
+    file.write_all(b"1")?;
 
     Ok(())
 }

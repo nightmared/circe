@@ -10,9 +10,8 @@ nix = "0.23"
 thiserror = "1.0"
 nasty_network_ioctls = { path = "../deps/nasty_network_ioctls" }
 ipnetwork = "0.18"
-ureq = { version = "2.3", default-features = false, features = [] }
 tar = "0.4"
 serde_json = "1.0"
 serde = "1.0"
 serde_derive = "1.0"
-circe_common = { path = "../circe_common" }
+circe_common = { path = "../circe_common", features=["net"] }
