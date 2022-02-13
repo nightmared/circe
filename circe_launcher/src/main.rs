@@ -81,7 +81,7 @@ fn main() -> Result<(), Error> {
         .args([
             "-append",
             &format!(
-                "earlyprintk=serial,ttyS0,115200 console=ttyS0,115200 {}",
+                "earlyprintk=serial,ttyS0,115200 console=ttyS0,115200 norandmaps {}",
                 format!(
                     "ip={}/{} port={} challenge={}",
                     chall.container_ip,

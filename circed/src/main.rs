@@ -106,7 +106,7 @@ async fn handle_challenge_query(
         ChallengeQueryKind::Initramfs(InitramfsQuery::ShuttingDown) => {}
         ChallengeQueryKind::Client(ClientQuery::RetrieveDockerConfig) => {
             let mut file_path = conf.image_folder.clone();
-            file_path.push(&format!("{}.docker_config.json", challenge_name));
+            file_path.push(&format!("{}.config.json", challenge_name));
             let mut docker_config_raw = Vec::new();
             File::open(file_path)
                 .await?
@@ -220,12 +220,23 @@ async fn handle_query(sock: &mut TcpStream, remote: SocketAddr) -> Result<(), Se
     }
 }
 
-async fn handle_query_wrapper(mut sock: TcpStream, remote: SocketAddr) -> Result<(), ServerError> {
+async fn handle_query_wrapper(mut sock: TcpStream, remote: SocketAddr) {
     let res = handle_query(&mut sock, remote).await;
 
-    sock.shutdown().await?;
+    if let Err(e) = res {
+        println!("[x] got error: {:?}", e);
+        sock.write_all(
+            serde_json::to_vec(&CirceResponse::Error(CirceResponseError::ServerError))
+                .expect("Could not serialize the error message")
+                .as_slice(),
+        )
+        .await
+        .expect("Could not forward the error messageback to the client");
+    }
 
-    res
+    sock.shutdown()
+        .await
+        .expect("Could not shudtwon the connection");
 }
 
 #[tokio::main]

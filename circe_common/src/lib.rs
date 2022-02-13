@@ -139,6 +139,9 @@ pub fn load_config() -> Result<Config, ConfigError> {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct DockuerVolume {}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct DockerImageConfig {
     #[serde(rename = "Cmd")]
     pub cmd: Vec<String>,
@@ -148,6 +151,8 @@ pub struct DockerImageConfig {
     pub env_variables: Vec<String>,
     #[serde(rename = "WorkingDir")]
     pub work_directory: String,
+    #[serde(rename = "Volumes")]
+    pub volumes: Option<HashMap<String, DockuerVolume>>,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -160,6 +165,7 @@ pub enum InitramfsQuery {
 pub enum CirceResponseError {
     InvalidQuery,
     NetworkError,
+    ServerError,
     NonExistentChallenge,
     NonExistentConfigFileForChallenge,
     Unauthorized,

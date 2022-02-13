@@ -1,6 +1,7 @@
 use std::ffi::NulError;
 use std::ffi::{CStr, CString};
-use std::fs::{remove_file, File};
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::panic::catch_unwind;
 use std::path::Path;
@@ -11,14 +12,15 @@ use libc::setenv;
 use nasty_network_ioctls::{interface_set_ip, interface_set_up, set_default_route};
 use nix::fcntl::OFlag;
 use nix::mount::{mount, MsFlags};
+use nix::sched::{clone, CloneFlags};
 use nix::sys::stat::Mode;
 use nix::sys::wait::WaitPidFlag;
 use nix::unistd::{chdir, chroot, execve, execvpe, fork, mkdir, setsid, sleep, ForkResult};
 use thiserror::Error;
 
 use circe_common::{
-    perform_query_without_response, ChallengeQuery, ChallengeQueryKind, CirceQueryRaw,
-    DockerImageConfig, InitramfsQuery, QueryError,
+    perform_query, perform_query_without_response, Challenge, ChallengeQuery, ChallengeQueryKind,
+    CirceQueryRaw, CirceResponseData, ClientQuery, DockerImageConfig, InitramfsQuery, QueryError,
 };
 
 #[derive(Error, Debug)]
@@ -41,8 +43,11 @@ pub enum Error {
     #[error("Could not perform a query")]
     QueryError(#[from] QueryError),
 
-    #[error("cannot read json files from docker")]
+    #[error("Cannot read json files from docker")]
     DockerParsingError(#[from] serde_json::Error),
+
+    #[error("Logic error in the server")]
+    InvalidServerResponse,
 }
 
 const CONTAINER_PATH: &'static str = "/container";
@@ -95,6 +100,87 @@ fn send_ping(challenge_name: &str, gateway: Ipv4Addr, server_port: u16) -> ! {
             Err(e) => println!("[x] the ping sender panic()ed: {:?}", e),
         }
     }
+}
+
+fn container_process(
+    container_path: &Path,
+    challenge_metadata: &Challenge,
+    config: &mut DockerImageConfig,
+    challenge_name: &String,
+) -> Result<(), Error> {
+    println!("[+] chrooting inside the container");
+    chdir(container_path)?;
+    chroot(".")?;
+
+    if config.work_directory == "" {
+        config.work_directory = String::from("/");
+    }
+
+    println!("[+] moving to the directory {}", config.work_directory);
+    chdir(Path::new(&config.work_directory))?;
+
+    if let Some(ref volumes) = config.volumes {
+        for volume in volumes.keys() {
+            if volume.ends_with("flag.txt") {
+                println!("[+] flag volume found, writing to the target file path");
+                let mut fd = OpenOptions::new().write(true).create(true).open(volume)?;
+                fd.write(challenge_metadata.flag.as_bytes())?;
+            }
+        }
+    }
+
+    println!("[+] switching to the log file");
+    let console_fd = nix::fcntl::open("/logs", OFlag::O_CREAT | OFlag::O_RDWR, Mode::empty())?;
+    nix::unistd::dup2(console_fd, 0)?;
+    nix::unistd::dup2(console_fd, 1)?;
+    nix::unistd::dup2(console_fd, 2)?;
+    nix::unistd::close(console_fd)?;
+    setsid()?;
+
+    let mut cmd = Vec::new();
+    if let Some(v) = &config.entrypoint {
+        for arg in v {
+            cmd.push(CString::new(arg.as_bytes())?);
+        }
+    }
+    for arg in &config.cmd {
+        cmd.push(CString::new(arg.as_bytes())?);
+    }
+
+    let mut env: Vec<CString> = config
+        .env_variables
+        .iter()
+        .map(|x| CString::new(x.as_bytes()))
+        .flatten()
+        .collect();
+    env.push(CString::new(format!("HOSTNAME={}", &challenge_name))?);
+    env.push(CString::new(format!("PWD={}", &config.work_directory))?);
+
+    println!(
+        "[+] launching the container executable {:?} with environment {:?}",
+        cmd, env
+    );
+
+    // "execvpe() searches for the program using the value of PATH from the caller's environment, not from the envp argument."
+    for val in env.iter() {
+        let split_val: Vec<&[u8]> = val.as_bytes().splitn(2, |&b| b == b'=').collect();
+        if split_val.len() != 2 {
+            println!("Invalid env variable {:?}", val);
+            continue;
+        }
+        if split_val[0] == b"PATH" {
+            unsafe {
+                setenv(
+                    CString::new("PATH")?.as_ptr(),
+                    split_val[1].as_ptr() as *const i8,
+                    1,
+                );
+            }
+        }
+    }
+    execvpe(cmd[0].as_c_str(), &cmd, &env)?;
+
+    Ok(())
 }
 
 fn main() -> Result<(), Error> {
@@ -157,7 +243,7 @@ fn main() -> Result<(), Error> {
 
     println!("[+] setting up the network");
 
-    let (net, challenge, server_port) = {
+    let (net, challenge_name, server_port) = {
         let mut ip = None;
         let mut challenge = None;
         let mut server_port = None;
@@ -186,10 +272,12 @@ fn main() -> Result<(), Error> {
 
     let gateway = net.nth(1).unwrap();
 
-    println!("{:?}", set_default_route(gateway));
+    set_default_route(gateway)?;
 
-    let challenge_name = challenge.clone();
-    std::thread::spawn(move || -> ! { send_ping(&challenge_name, gateway, server_port) });
+    {
+        let challenge_name = challenge_name.clone();
+        std::thread::spawn(move || -> ! { send_ping(&challenge_name, gateway, server_port) });
+    }
 
     println!("[+] mounting the container image");
 
@@ -202,16 +290,29 @@ fn main() -> Result<(), Error> {
         None::<&str>,
     )?;
 
-    println!("[+] parsing the container configuration");
+    println!("[+] retrieving the challenge metadata");
+    let challenge_metadata = match perform_query(
+        &SocketAddr::V4(SocketAddrV4::new(gateway, server_port)),
+        CirceQueryRaw::Challenge(ChallengeQuery {
+            kind: ChallengeQueryKind::Client(ClientQuery::RetrieveChallengeMetadata),
+            challenge_name: challenge_name.to_string(),
+        }),
+    )? {
+        CirceResponseData::ChallengeMetadata(meta) => meta,
+        _ => return Err(Error::InvalidServerResponse),
+    };
 
-    let mut config: DockerImageConfig = serde_json::from_reader(File::open(&format!(
-        "{}/circe_container_config.json",
-        CONTAINER_PATH
-    ))?)?;
-
-    if config.work_directory == "" {
-        config.work_directory = String::from("/");
-    }
+    println!("[+] retrieving the container configuration");
+    let mut docker_config = match perform_query(
+        &SocketAddr::V4(SocketAddrV4::new(gateway, server_port)),
+        CirceQueryRaw::Challenge(ChallengeQuery {
+            kind: ChallengeQueryKind::Client(ClientQuery::RetrieveDockerConfig),
+            challenge_name: challenge_name.to_string(),
+        }),
+    )? {
+        CirceResponseData::DockerImageConfig(config) => config,
+        _ => return Err(Error::InvalidServerResponse),
+    };
 
     println!("[+] mounting a writable overlay on top of the container");
 
@@ -250,70 +351,28 @@ fn main() -> Result<(), Error> {
         ),
     )?;
 
-    let container_process = unsafe { fork()? };
-    if let ForkResult::Child = container_process {
-        println!("[+] chrooting inside the container");
-        chdir(&container_merged)?;
-        chroot(".")?;
-
-        // remove /circe_container_config.json from the container
-        println!("[+] removing circe files from the container rootfs");
-        remove_file("/circe_container_config.json")?;
-
-        println!("[+] moving to the directory {}", config.work_directory);
-        chdir(Path::new(&config.work_directory))?;
-
-        println!("[+] switching to the log file");
-        let console_fd = nix::fcntl::open("/logs", OFlag::O_CREAT | OFlag::O_RDWR, Mode::empty())?;
-        nix::unistd::dup2(console_fd, 0)?;
-        nix::unistd::dup2(console_fd, 1)?;
-        nix::unistd::dup2(console_fd, 2)?;
-        nix::unistd::close(console_fd)?;
-        setsid()?;
-
-        let mut cmd = Vec::new();
-        if let Some(v) = config.entrypoint {
-            for arg in v {
-                cmd.push(CString::new(arg)?);
-            }
-        }
-        for arg in config.cmd {
-            cmd.push(CString::new(arg)?);
-        }
-
-        let mut env: Vec<CString> = config
-            .env_variables
-            .into_iter()
-            .map(|x| CString::new(x))
-            .flatten()
-            .collect();
-        env.push(CString::new(format!("HOSTNAME={}", &challenge))?);
-        env.push(CString::new(format!("PWD={}", &config.work_directory))?);
-
-        println!(
-            "[+] launching the container executable {:?} with environment {:?}",
-            cmd, env
-        );
-
-        // "execvpe() searches for the program using the value of PATH from the caller's environment, not from the envp argument."
-        for val in env.iter() {
-            let split_val: Vec<&[u8]> = val.as_bytes().splitn(2, |&b| b == b'=').collect();
-            if split_val.len() != 2 {
-                println!("Invalid env variable {:?}", val);
-                continue;
-            }
-            if split_val[0] == b"PATH" {
-                unsafe {
-                    setenv(
-                        CString::new("PATH")?.as_ptr(),
-                        split_val[1].as_ptr() as *const i8,
-                        1,
-                    );
-                }
-            }
-        }
-        execvpe(cmd[0].as_c_str(), &cmd, &env)?;
-    }
+    let container_pid = {
+        // 8MB
+        let mut container_stack = Vec::<u8>::with_capacity(8 * 1024 * 1024);
+        container_stack.resize(8 * 1024 * 1024, 0u8);
+        let challenge_name = challenge_name.clone();
+        let pid = clone(
+            Box::new(|| -> isize {
+                container_process(
+                    &container_merged,
+                    &challenge_metadata,
+                    &mut docker_config,
+                    &challenge_name,
+                )
+                .expect("The process broke");
+                0
+            }),
+            container_stack.as_mut_slice(),
+            CloneFlags::CLONE_UNTRACED | CloneFlags::CLONE_NEWNS | CloneFlags::CLONE_NEWPID,
+            None,
+        )?;
+        pid
+    };
 
     println!("[+] spawing a shell");
 
@@ -327,13 +386,8 @@ fn main() -> Result<(), Error> {
         execve(sh_path, &[sh_path], &[] as &[&CStr; 0])?;
     }
 
-    let (container_child, shell_child) = match (container_process, shell_process) {
-        (
-            ForkResult::Parent {
-                child: container_child,
-            },
-            ForkResult::Parent { child: shell_child },
-        ) => (container_child, shell_child),
+    let shell_child = match shell_process {
+        ForkResult::Parent { child: shell_child } => shell_child,
         _ => panic!("Couldn't retrieve the PIDs of the forked processes"),
     };
 
@@ -342,7 +396,7 @@ fn main() -> Result<(), Error> {
 
         // return if any of the two process groups died
         if let Err(e) = nix::sys::wait::waitpid(
-            nix::unistd::Pid::from_raw(-container_child.as_raw()),
+            nix::unistd::Pid::from_raw(-container_pid.as_raw()),
             Some(WaitPidFlag::WNOHANG),
         ) {
             if e == nix::errno::Errno::ECHILD {
@@ -362,7 +416,7 @@ fn main() -> Result<(), Error> {
     }
 
     send_message_to_manager(
-        &challenge,
+        &challenge_name,
         gateway,
         server_port,
         InitramfsQuery::ShuttingDown,

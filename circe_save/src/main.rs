@@ -72,7 +72,6 @@ fn save_image(config: &Config, chall: &Challenge) -> Result<(), Error> {
             "circe_launcher/mksquashfs.sh",
             &image_name,
             &dest_squashfs_file,
-            &dest_json_file,
         ])
         .spawn()?
         .wait()?;
