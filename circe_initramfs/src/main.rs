@@ -112,6 +112,14 @@ fn container_process(
     chdir(container_path)?;
     chroot(".")?;
 
+    println!("[+] switching to the log file");
+    let console_fd = nix::fcntl::open("/logs", OFlag::O_CREAT | OFlag::O_RDWR, Mode::empty())?;
+    nix::unistd::dup2(console_fd, 0)?;
+    nix::unistd::dup2(console_fd, 1)?;
+    nix::unistd::dup2(console_fd, 2)?;
+    nix::unistd::close(console_fd)?;
+    setsid()?;
+
     if config.work_directory == "" {
         config.work_directory = String::from("/");
     }
@@ -128,14 +136,6 @@ fn container_process(
             }
         }
     }
-
-    println!("[+] switching to the log file");
-    let console_fd = nix::fcntl::open("/logs", OFlag::O_CREAT | OFlag::O_RDWR, Mode::empty())?;
-    nix::unistd::dup2(console_fd, 0)?;
-    nix::unistd::dup2(console_fd, 1)?;
-    nix::unistd::dup2(console_fd, 2)?;
-    nix::unistd::close(console_fd)?;
-    setsid()?;
 
     let mut cmd = Vec::new();
     if let Some(v) = &config.entrypoint {
