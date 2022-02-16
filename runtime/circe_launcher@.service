@@ -1,0 +1,11 @@
+[Unit]
+Description=Execute the challenge %i in a dedicated virtual machine
+
+[Service]
+Type=simple
+ExecStart=/home/nightmared/dev/thc/circe/target/debug/circe_launcher %i
+WorkingDirectory=/home/nightmared/dev/thc/circe
+User=nightmared
+
+[Install]
+WantedBy=multi-user.target

@@ -63,7 +63,7 @@ fn main() -> Result<(), Error> {
         macaddr.push_str(&format!(":{:02x}", octet));
     }
 
-    let qmp_path = &format!("/tmp/circe-qmp-{}", chall.name);
+    let qmp_path = &format!("/var/run/circe/qmp-{}", chall.name);
 
     // delete stale socket files
     let _ = std::fs::remove_file(&qmp_path);

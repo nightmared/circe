@@ -1,0 +1,9 @@
+[Unit]
+Description=Manage the challenges
+[Service]
+Type=simple
+ExecStart=/home/nightmared/dev/thc/circe/target/debug/circed
+WorkingDirectory=/home/nightmared/dev/thc/circe
+
+[Install]
+WantedBy=multi-user.target
