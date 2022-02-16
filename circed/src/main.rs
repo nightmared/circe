@@ -5,16 +5,17 @@ use std::time::SystemTime;
 
 use circe_common::load_config;
 use circe_common::AuthenticatedQuery;
+use circe_common::Challenge;
 use circe_common::ChallengeQuery;
 use circe_common::ChallengeQueryKind;
 use circe_common::CirceQuery;
 use circe_common::CirceQueryRaw;
 use circe_common::CirceResponse;
-use circe_common::CirceResponseData;
 use circe_common::CirceResponseError;
 use circe_common::ClientQuery;
 use circe_common::Config;
 use circe_common::ConfigError;
+use circe_common::DockerImageConfig;
 use circe_common::InitramfsQuery;
 use once_cell::sync::OnceCell;
 use sha2::{Digest, Sha256};
@@ -23,7 +24,7 @@ use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 use tracing::error;
 
 mod network;
@@ -71,7 +72,7 @@ fn setup_network(conf: &Config) -> Result<(), Error> {
     setup_nat(&conf)
 }
 
-static GLOBAL_CONFIG: OnceCell<Mutex<Config>> = OnceCell::new();
+static GLOBAL_CONFIG: OnceCell<RwLock<Config>> = OnceCell::new();
 
 async fn handle_challenge_query(
     sock: &mut TcpStream,
@@ -83,13 +84,14 @@ async fn handle_challenge_query(
     let mut conf = GLOBAL_CONFIG
         .get()
         .expect("the global configuration is not initialized")
-        .lock()
+        // todo: optimize this to be read-mostly
+        .write()
         .await;
     let chall = match conf.challenges.get_mut(challenge_name) {
         Some(x) => x,
         None => {
             sock.write_all(
-                serde_json::to_vec(&CirceResponse::Error(
+                serde_json::to_vec(&CirceResponse::<()>::Error(
                     CirceResponseError::NonExistentChallenge,
                 ))?
                 .as_slice(),
@@ -103,7 +105,10 @@ async fn handle_challenge_query(
         ChallengeQueryKind::Initramfs(InitramfsQuery::ServiceAvailable) => {
             chall.last_seen_available = Some(SystemTime::now());
         }
-        ChallengeQueryKind::Initramfs(InitramfsQuery::ShuttingDown) => {}
+        ChallengeQueryKind::Initramfs(InitramfsQuery::ShuttingDown) => {
+            chall.last_seen_available = None;
+            chall.serial_pts = None;
+        }
         ChallengeQueryKind::Client(ClientQuery::RetrieveDockerConfig) => {
             let mut file_path = conf.image_folder.clone();
             file_path.push(&format!("{}.config.json", challenge_name));
@@ -112,12 +117,9 @@ async fn handle_challenge_query(
                 .await?
                 .read_to_end(&mut docker_config_raw)
                 .await?;
-            let docker_config = serde_json::from_slice(&docker_config_raw)?;
+            let docker_config: DockerImageConfig = serde_json::from_slice(&docker_config_raw)?;
             sock.write_all(
-                serde_json::to_vec(&CirceResponse::SuccessWithData(
-                    CirceResponseData::DockerImageConfig(docker_config),
-                ))?
-                .as_slice(),
+                serde_json::to_vec(&CirceResponse::SuccessWithData(docker_config))?.as_slice(),
             )
             .await?;
             return Ok(());
@@ -125,17 +127,16 @@ async fn handle_challenge_query(
         ChallengeQueryKind::Client(ClientQuery::RetrieveChallengeMetadata) => {
             if remote.ip() != chall.container_ip && !authenticated {
                 sock.write_all(
-                    serde_json::to_vec(&CirceResponse::Error(CirceResponseError::Unauthorized))?
-                        .as_slice(),
+                    serde_json::to_vec(&CirceResponse::<Challenge>::Error(
+                        CirceResponseError::Unauthorized,
+                    ))?
+                    .as_slice(),
                 )
                 .await?;
                 return Ok(());
             }
             sock.write_all(
-                serde_json::to_vec(&CirceResponse::SuccessWithData(
-                    CirceResponseData::ChallengeMetadata(chall.clone()),
-                ))?
-                .as_slice(),
+                serde_json::to_vec(&CirceResponse::SuccessWithData(chall.clone()))?.as_slice(),
             )
             .await?;
             return Ok(());
@@ -149,7 +150,7 @@ async fn handle_challenge_query(
         }
     }
 
-    sock.write_all(serde_json::to_vec(&CirceResponse::Success)?.as_slice())
+    sock.write_all(serde_json::to_vec(&CirceResponse::<()>::Success)?.as_slice())
         .await?;
     Ok(())
 }
@@ -175,6 +176,24 @@ async fn handle_query_raw(
 
             handle_challenge_query(sock, remote, kind, &challenge_name, authenticated).await
         }
+        CirceQueryRaw::RetrieveChallengeList => {
+            let conf = GLOBAL_CONFIG
+                .get()
+                .expect("the global configuration is not initialized")
+                .read()
+                .await;
+            sock.write_all(
+                serde_json::to_vec(&CirceResponse::SuccessWithData(
+                    conf.challenges
+                        .keys()
+                        .map(String::clone)
+                        .collect::<Vec<String>>(),
+                ))?
+                .as_slice(),
+            )
+            .await?;
+            return Ok(());
+        }
     }
 }
 
@@ -182,7 +201,10 @@ async fn handle_query(sock: &mut TcpStream, remote: SocketAddr) -> Result<(), Se
     let mut buf = Vec::new();
     if let Err(_) = sock.read_to_end(&mut buf).await {
         sock.write_all(
-            serde_json::to_vec(&CirceResponse::Error(CirceResponseError::NetworkError))?.as_slice(),
+            serde_json::to_vec(&CirceResponse::<()>::Error(
+                CirceResponseError::NetworkError,
+            ))?
+            .as_slice(),
         )
         .await?;
         return Ok(());
@@ -197,7 +219,7 @@ async fn handle_query(sock: &mut TcpStream, remote: SocketAddr) -> Result<(), Se
             let conf = GLOBAL_CONFIG
                 .get()
                 .expect("the global configuration is not initialized")
-                .lock()
+                .read()
                 .await;
 
             // we compare the sha256 hash because this reduces the impact of many
@@ -205,8 +227,10 @@ async fn handle_query(sock: &mut TcpStream, remote: SocketAddr) -> Result<(), Se
             if Sha256::digest(auth_key.as_bytes()) != Sha256::digest(conf.symmetric_key.as_bytes())
             {
                 sock.write_all(
-                    serde_json::to_vec(&CirceResponse::Error(CirceResponseError::WrongAuthKey))?
-                        .as_slice(),
+                    serde_json::to_vec(&CirceResponse::<()>::Error(
+                        CirceResponseError::WrongAuthKey,
+                    ))?
+                    .as_slice(),
                 )
                 .await?;
                 return Ok(());
@@ -226,7 +250,7 @@ async fn handle_query_wrapper(mut sock: TcpStream, remote: SocketAddr) {
     if let Err(e) = res {
         println!("[x] got error: {:?}", e);
         sock.write_all(
-            serde_json::to_vec(&CirceResponse::Error(CirceResponseError::ServerError))
+            serde_json::to_vec(&CirceResponse::<()>::Error(CirceResponseError::ServerError))
                 .expect("Could not serialize the error message")
                 .as_slice(),
         )
@@ -245,7 +269,7 @@ async fn main() -> Result<(), Error> {
     tracing_subscriber::fmt::init();
 
     let config = load_config()?;
-    GLOBAL_CONFIG.set(Mutex::new(config.clone())).unwrap();
+    GLOBAL_CONFIG.set(RwLock::new(config.clone())).unwrap();
 
     setup_network(&config)?;
 

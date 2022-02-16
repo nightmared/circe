@@ -1,11 +1,7 @@
 #![feature(path_try_exists)]
 
 use qapi::Qmp;
-use std::{
-    net::{SocketAddr, SocketAddrV4},
-    os::unix::net::UnixStream,
-    process::Command,
-};
+use std::{os::unix::net::UnixStream, process::Command};
 use thiserror::Error;
 
 use circe_common::{
@@ -129,10 +125,7 @@ fn main() -> Result<(), Error> {
                     println!("The serial device is '{}'", serial_device);
                     // notify the server of the serial device path
                     perform_query_without_response(
-                        &SocketAddr::V4(SocketAddrV4::new(
-                            config.network.nth(1).unwrap(),
-                            config.listening_port,
-                        )),
+                        &config.get_server_address(),
                         CirceQueryRaw::Challenge(ChallengeQuery {
                             kind: ChallengeQueryKind::Client(ClientQuery::SetSerialTerminal(
                                 serial_device.to_string(),

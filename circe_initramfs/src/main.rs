@@ -20,7 +20,7 @@ use thiserror::Error;
 
 use circe_common::{
     perform_query, perform_query_without_response, Challenge, ChallengeQuery, ChallengeQueryKind,
-    CirceQueryRaw, CirceResponseData, ClientQuery, DockerImageConfig, InitramfsQuery, QueryError,
+    CirceQueryRaw, ClientQuery, DockerImageConfig, InitramfsQuery, QueryError,
 };
 
 #[derive(Error, Debug)]
@@ -45,9 +45,6 @@ pub enum Error {
 
     #[error("Cannot read json files from docker")]
     DockerParsingError(#[from] serde_json::Error),
-
-    #[error("Logic error in the server")]
-    InvalidServerResponse,
 }
 
 const CONTAINER_PATH: &'static str = "/container";
@@ -291,28 +288,22 @@ fn main() -> Result<(), Error> {
     )?;
 
     println!("[+] retrieving the challenge metadata");
-    let challenge_metadata = match perform_query(
+    let challenge_metadata = perform_query(
         &SocketAddr::V4(SocketAddrV4::new(gateway, server_port)),
         CirceQueryRaw::Challenge(ChallengeQuery {
             kind: ChallengeQueryKind::Client(ClientQuery::RetrieveChallengeMetadata),
             challenge_name: challenge_name.to_string(),
         }),
-    )? {
-        CirceResponseData::ChallengeMetadata(meta) => meta,
-        _ => return Err(Error::InvalidServerResponse),
-    };
+    )?;
 
     println!("[+] retrieving the container configuration");
-    let mut docker_config = match perform_query(
+    let mut docker_config = perform_query(
         &SocketAddr::V4(SocketAddrV4::new(gateway, server_port)),
         CirceQueryRaw::Challenge(ChallengeQuery {
             kind: ChallengeQueryKind::Client(ClientQuery::RetrieveDockerConfig),
             challenge_name: challenge_name.to_string(),
         }),
-    )? {
-        CirceResponseData::DockerImageConfig(config) => config,
-        _ => return Err(Error::InvalidServerResponse),
-    };
+    )?;
 
     println!("[+] mounting a writable overlay on top of the container");
 

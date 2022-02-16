@@ -24,7 +24,7 @@ use circe_common::{Challenge, Config};
 
 static FILTER_TABLE_NAME: Lazy<CString> = Lazy::new(|| CString::new("circe_filter").unwrap());
 static INPUT_CHAIN_NAME: Lazy<CString> = Lazy::new(|| CString::new("circe_input").unwrap());
-static OUTPUT_CHAIN_NAME: Lazy<CString> = Lazy::new(|| CString::new("circe_output").unwrap());
+//static OUTPUT_CHAIN_NAME: Lazy<CString> = Lazy::new(|| CString::new("circe_output").unwrap());
 static FORWARD_CHAIN_NAME: Lazy<CString> = Lazy::new(|| CString::new("circe_forward").unwrap());
 static NAT_TABLE_NAME: Lazy<CString> = Lazy::new(|| CString::new("circe_nat").unwrap());
 static PREROUTING_CHAIN_NAME: Lazy<CString> =
@@ -66,7 +66,13 @@ fn allow_containers_to_phone_home(batch: &mut Batch, input: Rc<Chain>, conf: &Co
     }
 }
 
-fn create_port_forwarding(batch: &mut Batch, prerouting: Rc<Chain>, chall: &Challenge) {
+fn create_port_forwarding(
+    batch: &mut Batch,
+    prerouting: Rc<Chain>,
+    forward: Rc<Chain>,
+    chall: &Challenge,
+    bridge_name: &str,
+) {
     // redirect packets received on chall.sources to the challenge
     let mut rule = Rule::new(prerouting);
     rule.add_expr(&Meta::L4Proto);
@@ -92,6 +98,27 @@ fn create_port_forwarding(batch: &mut Batch, prerouting: Rc<Chain>, chall: &Chal
         port_register: Some(Register::Reg2),
     });
     batch.add(&rule, MsgType::Add);
+
+    let mut name_arr = [0u8; libc::IFNAMSIZ];
+    for (pos, i) in bridge_name.bytes().enumerate() {
+        name_arr[pos] = i;
+    }
+
+    // allow packets we just prerouted to go through
+    let mut rule = Rule::new(forward.clone());
+    rule.add_expr(&Meta::L4Proto);
+    rule.add_expr(&Cmp::new(CmpOp::Eq, libc::IPPROTO_TCP as u8));
+    rule.add_expr(&Payload::Network(NetworkHeaderField::Ipv4(
+        Ipv4HeaderField::Daddr,
+    )));
+    rule.add_expr(&Cmp::new(CmpOp::Eq, chall.container_ip));
+    rule.add_expr(&Payload::Transport(TransportHeaderField::Tcp(
+        TcpHeaderField::Dport,
+    )));
+    rule.add_expr(&Cmp::new(CmpOp::Eq, chall.destination_port.to_be()));
+    rule.add_expr(&Meta::OifName);
+    rule.add_expr(&Cmp::new(CmpOp::Eq, name_arr.as_ref()));
+    batch.add(&rule.accept(), MsgType::Add);
 }
 
 fn disable_arbitrary_forwarding(batch: &mut Batch, forward: Rc<Chain>, interface_name: &str) {
@@ -118,11 +145,6 @@ fn disable_arbitrary_forwarding(batch: &mut Batch, forward: Rc<Chain>, interface
     rule.add_expr(&Counter::new());
     rule.add_expr(&Verdict::Drop);
     batch.add(&rule, MsgType::Add);
-
-    let mut rule = Rule::new(forward);
-    rule.add_expr(&Counter::new());
-    rule.add_expr(&Verdict::Accept);
-    batch.add(&rule, MsgType::Add);
 }
 
 pub fn setup_nat(conf: &Config) -> Result<(), Error> {
@@ -145,8 +167,7 @@ pub fn setup_nat(conf: &Config) -> Result<(), Error> {
     let mut forward_chain = Chain::new(&FORWARD_CHAIN_NAME.as_ref(), filter_table.clone());
     forward_chain.set_type(rustables::ChainType::Filter);
     forward_chain.set_hook(rustables::Hook::Forward, -5i32);
-    // disable forwarding by default
-    forward_chain.set_policy(rustables::Policy::Drop);
+    forward_chain.set_policy(rustables::Policy::Accept);
     batch.add(&forward_chain, MsgType::Add);
     let forward_chain = Rc::new(forward_chain);
     let mut input_chain = Chain::new(&INPUT_CHAIN_NAME.as_ref(), filter_table.clone());
@@ -154,11 +175,11 @@ pub fn setup_nat(conf: &Config) -> Result<(), Error> {
     input_chain.set_hook(rustables::Hook::In, -5i32);
     batch.add(&input_chain, MsgType::Add);
     let input_chain = Rc::new(input_chain);
-    let mut output_chain = Chain::new(&OUTPUT_CHAIN_NAME.as_ref(), filter_table);
-    output_chain.set_type(rustables::ChainType::Filter);
-    output_chain.set_hook(rustables::Hook::Out, -5i32);
-    batch.add(&output_chain, MsgType::Add);
-    let output_chain = Rc::new(output_chain);
+    //let mut output_chain = Chain::new(&OUTPUT_CHAIN_NAME.as_ref(), filter_table);
+    //output_chain.set_type(rustables::ChainType::Filter);
+    //output_chain.set_hook(rustables::Hook::Out, -5i32);
+    //batch.add(&output_chain, MsgType::Add);
+    //let output_chain = Rc::new(output_chain);
 
     let nat_table = Rc::new(Table::new(&NAT_TABLE_NAME.as_ref(), ProtoFamily::Ipv4));
     batch.add(&nat_table, MsgType::Add);
@@ -172,6 +193,10 @@ pub fn setup_nat(conf: &Config) -> Result<(), Error> {
     batch.add(&postrouting_chain, MsgType::Add);
     let prerouting_chain = Rc::new(prerouting_chain);
 
+    allow_containers_to_phone_home(&mut batch, input_chain, &conf);
+
+    disable_arbitrary_forwarding(&mut batch, forward_chain.clone(), &conf.bridge_name);
+
     for chall in conf.challenges.values() {
         if !conf.network.contains(chall.container_ip) {
             error!(
@@ -180,12 +205,14 @@ pub fn setup_nat(conf: &Config) -> Result<(), Error> {
             );
             continue;
         }
-        create_port_forwarding(&mut batch, prerouting_chain.clone(), chall);
+        create_port_forwarding(
+            &mut batch,
+            prerouting_chain.clone(),
+            forward_chain.clone(),
+            chall,
+            &conf.bridge_name,
+        );
     }
-
-    allow_containers_to_phone_home(&mut batch, input_chain, &conf);
-
-    disable_arbitrary_forwarding(&mut batch, forward_chain, &conf.bridge_name);
 
     if let Some(mut batch) = batch.finalize() {
         send_batch(&mut batch)?;

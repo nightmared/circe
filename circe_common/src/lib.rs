@@ -1,13 +1,13 @@
-use std::collections::HashMap;
 #[cfg(any(feature = "toml_support", feature = "net"))]
 use std::io::Read;
 #[cfg(feature = "net")]
 use std::io::Write;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddrV4};
 #[cfg(feature = "net")]
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::time::SystemTime;
+use std::{collections::HashMap, time::Duration};
 
 use ipnetwork::Ipv4Network;
 use serde_derive::{Deserialize, Serialize};
@@ -87,6 +87,16 @@ impl From<RawConfig> for Config {
     }
 }
 
+#[cfg(feature = "net")]
+impl Config {
+    pub fn get_server_address(&self) -> SocketAddr {
+        SocketAddr::V4(SocketAddrV4::new(
+            self.network.nth(1).unwrap(),
+            self.listening_port,
+        ))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Challenge {
     // both the name of the container and of the challenge
@@ -110,9 +120,16 @@ impl Challenge {
             destination_port: raw.destination_port,
             container_ip: raw.container_ip,
             memory_allocation: raw.memory_allocation,
-            flag: String::from("sup3r_s3cr3t_fl4g"),
+            flag: raw.flag,
             serial_pts: None,
             last_seen_available: None,
+        }
+    }
+
+    pub fn is_running(&self) -> bool {
+        match self.last_seen_available {
+            Some(time) => time > SystemTime::now() - Duration::new(60, 1),
+            None => false,
         }
     }
 }
@@ -200,6 +217,7 @@ pub struct AuthenticatedQuery<T> {
 #[derive(Deserialize, Serialize, Debug)]
 pub enum CirceQueryRaw {
     Challenge(ChallengeQuery),
+    RetrieveChallengeList,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -209,15 +227,9 @@ pub enum CirceQuery {
 }
 
 #[derive(Deserialize, Serialize, Debug)]
-pub enum CirceResponseData {
-    DockerImageConfig(DockerImageConfig),
-    ChallengeMetadata(Challenge),
-}
-
-#[derive(Deserialize, Serialize, Debug)]
-pub enum CirceResponse {
+pub enum CirceResponse<T> {
     Success,
-    SuccessWithData(CirceResponseData),
+    SuccessWithData(T),
     Error(CirceResponseError),
 }
 
@@ -256,7 +268,7 @@ pub fn perform_query_without_response(
     val: CirceQueryRaw,
 ) -> Result<(), QueryError> {
     let response = perform_raw_query(target_addr, &CirceQuery::Raw(val))?;
-    match serde_json::from_slice(&response)? {
+    match serde_json::from_slice::<CirceResponse<()>>(&response)? {
         CirceResponse::Success => return Ok(()),
         CirceResponse::SuccessWithData(_) => return Err(QueryError::TooMuchDataError),
         CirceResponse::Error(e) => return Err(QueryError::CirceError(e)),
@@ -264,10 +276,10 @@ pub fn perform_query_without_response(
 }
 
 #[cfg(feature = "net")]
-pub fn perform_query(
+pub fn perform_query<T: for<'a> serde::Deserialize<'a>>(
     target_addr: &SocketAddr,
     val: CirceQueryRaw,
-) -> Result<CirceResponseData, QueryError> {
+) -> Result<T, QueryError> {
     let response = perform_raw_query(target_addr, &CirceQuery::Raw(val))?;
     match serde_json::from_slice(&response)? {
         CirceResponse::Success => return Err(QueryError::MissingDataError),
@@ -277,16 +289,16 @@ pub fn perform_query(
 }
 
 #[cfg(feature = "net")]
-pub fn perform_authenticated_query(
+pub fn perform_authenticated_query<T: for<'a> serde::Deserialize<'a>>(
     target_addr: &SocketAddr,
     val: CirceQueryRaw,
-    auth_key: String,
-) -> Result<CirceResponseData, QueryError> {
+    auth_key: &str,
+) -> Result<T, QueryError> {
     let response = perform_raw_query(
         target_addr,
         &CirceQuery::AuthenticatedQuery(AuthenticatedQuery {
             wrapped_query: val,
-            auth_key,
+            auth_key: auth_key.to_string(),
         }),
     )?;
     match serde_json::from_slice(&response)? {
