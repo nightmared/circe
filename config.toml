@@ -1,0 +1,24 @@
+network = "192.168.42.0/24"
+interface_name = "circe"
+listening_port = 8000
+user = "nightmared"
+src_folder = "challenges/src/"
+image_folder = "challenges/images/"
+symmetric_key = "some_private_secret_to_authenticate_ourself_to_the_server"
+qmp_folder = "/var/run/circe"
+
+[[challenges]]
+name = "chall1"
+source_port = 512
+container_ip = "192.168.42.2"
+destination_port = 80
+memory_in_MB = 1500
+flag = "Some_flag_here"
+
+[[challenges]]
+name = "chall2"
+source_port = 513
+container_ip = "192.168.42.3"
+destination_port = 80
+offset_directory = "docker"
+flag = "Some_other_flag_here"

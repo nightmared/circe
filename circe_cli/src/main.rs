@@ -1,7 +1,14 @@
 use std::net::SocketAddr;
 use std::net::SocketAddrV4;
 
+use circe_common::perform_authenticated_query_without_response;
+use clap::Arg;
+use clap::Command;
+use thiserror::Error;
+
 use circe_common::load_config;
+use circe_common::perform_authenticated_query;
+use circe_common::perform_query;
 use circe_common::Challenge;
 use circe_common::ChallengeQuery;
 use circe_common::ChallengeQueryKind;
@@ -9,12 +16,6 @@ use circe_common::CirceQueryRaw;
 use circe_common::ClientQuery;
 use circe_common::ConfigError;
 use circe_common::QueryError;
-
-use circe_common::perform_authenticated_query;
-use circe_common::perform_query;
-use clap::Arg;
-use clap::Command;
-use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -46,6 +47,7 @@ fn main() -> Result<(), Error> {
                 .about("Attach to the shell inside a challenge instance")
                 .arg(chall_name),
             Command::new("list").about("List the instances and their current states"),
+            Command::new("restart-server").about("Restart the circed instance"),
         ])
         .subcommand_required(true);
     let matches = app.get_matches();
@@ -79,13 +81,13 @@ fn main() -> Result<(), Error> {
         }
         Some(("list", _)) => {
             let chall_list: Vec<String> = perform_query(
-                &config.get_server_address(),
+                &SocketAddr::V4(config.get_server_address()),
                 CirceQueryRaw::RetrieveChallengeList,
             )?;
 
             for chall in chall_list {
                 let chall: Challenge = perform_authenticated_query(
-                    &config.get_server_address(),
+                    &SocketAddr::V4(config.get_server_address()),
                     CirceQueryRaw::Challenge(ChallengeQuery {
                         challenge_name: chall,
                         kind: ChallengeQueryKind::Client(ClientQuery::RetrieveChallengeMetadata),
@@ -94,12 +96,25 @@ fn main() -> Result<(), Error> {
                 )?;
 
                 println!(
-                    "{:35.35} {:15.15} {}",
+                    "{}\t{:35.35} {}->{}:{}",
+                    if chall.is_running() {
+                        "RUNNING"
+                    } else {
+                        "SHUTOFF"
+                    },
                     chall.name,
+                    chall.source_port,
                     chall.container_ip.to_string(),
-                    if chall.is_running() { "RUNNING" } else { "OFF" }
+                    chall.destination_port,
                 );
             }
+        }
+        Some(("restart-server", _)) => {
+            perform_authenticated_query_without_response(
+                &SocketAddr::V4(config.get_server_address()),
+                CirceQueryRaw::ReloadConfig,
+                &config.symmetric_key,
+            )?;
         }
         Some((&_, _)) => unreachable!(),
         None => unreachable!(),

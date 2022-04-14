@@ -49,6 +49,11 @@ pub enum Error {
 
 const CONTAINER_PATH: &'static str = "/container";
 
+const MOUNT_FLAGS: MsFlags = MsFlags::MS_NOEXEC
+    .union(MsFlags::MS_NOSUID)
+    .union(MsFlags::MS_NOATIME)
+    .union(MsFlags::MS_NODEV);
+
 fn setup_term(kmsg: bool) -> Result<(), Error> {
     let console_fd = nix::fcntl::open(
         if kmsg { "/dev/kmsg" } else { "/dev/ttyS0" },
@@ -105,17 +110,21 @@ fn container_process(
     config: &mut DockerImageConfig,
     challenge_name: &String,
 ) -> Result<(), Error> {
-    println!("[+] chrooting inside the container");
-    chdir(container_path)?;
-    chroot(".")?;
-
     println!("[+] switching to the log file");
-    let console_fd = nix::fcntl::open("/logs", OFlag::O_CREAT | OFlag::O_RDWR, Mode::empty())?;
+    let console_fd = nix::fcntl::open(
+        "/container_tmpfs/merged/logs",
+        OFlag::O_CREAT | OFlag::O_RDWR,
+        Mode::empty(),
+    )?;
     nix::unistd::dup2(console_fd, 0)?;
     nix::unistd::dup2(console_fd, 1)?;
     nix::unistd::dup2(console_fd, 2)?;
     nix::unistd::close(console_fd)?;
     setsid()?;
+
+    println!("[+] chrooting inside the container");
+    chdir(container_path)?;
+    chroot(".")?;
 
     if config.work_directory == "" {
         config.work_directory = String::from("/");
@@ -140,8 +149,10 @@ fn container_process(
             cmd.push(CString::new(arg.as_bytes())?);
         }
     }
-    for arg in &config.cmd {
-        cmd.push(CString::new(arg.as_bytes())?);
+    if let Some(config_cmd) = &config.cmd {
+        for arg in config_cmd {
+            cmd.push(CString::new(arg.as_bytes())?);
+        }
     }
 
     let mut env: Vec<CString> = config
@@ -214,36 +225,41 @@ fn main() -> Result<(), Error> {
     )?;
     mkdir("/tmp", Mode::S_IRWXU | Mode::S_IRWXG | Mode::S_IRWXO)?;
 
-    let mount_flags =
-        MsFlags::MS_NOEXEC | MsFlags::MS_NODEV | MsFlags::MS_NOSUID | MsFlags::MS_NOATIME;
     mount(
         Some("sysfs"),
         "/sys",
         Some("sysfs"),
-        mount_flags,
+        MOUNT_FLAGS,
         None::<&str>,
     )?;
     mount(
         None::<&str>,
         "/proc",
         Some("proc"),
-        mount_flags,
+        MOUNT_FLAGS,
         None::<&str>,
     )?;
     mount(
         Some("tmpfs"),
         "/tmp",
         Some("tmpfs"),
-        mount_flags,
+        MOUNT_FLAGS,
         None::<&str>,
     )?;
 
+    println!(
+        "[+] The system booted with the command line '{}'",
+        std::fs::read_to_string("/proc/cmdline")?
+    );
+
     println!("[+] setting up the network");
 
+    let mut no_kill = false;
     let (net, challenge_name, server_port) = {
         let mut ip = None;
         let mut challenge = None;
         let mut server_port = None;
+
         for v in std::fs::read_to_string("/proc/cmdline")?.split(" ") {
             if v.starts_with("ip=") {
                 ip = Some(Ipv4Network::from_str(&v[3..].trim()).unwrap());
@@ -253,6 +269,9 @@ fn main() -> Result<(), Error> {
             }
             if v.starts_with("port=") {
                 server_port = Some(u16::from_str(&v[5..])?);
+            }
+            if v.starts_with("no_kill") {
+                no_kill = true;
             }
         }
 
@@ -342,6 +361,52 @@ fn main() -> Result<(), Error> {
         ),
     )?;
 
+    println!("[+] creating usual system directories");
+    for dir in [
+        "/container_tmpfs/merged/sys",
+        "/container_tmpfs/merged/proc",
+        "/container_tmpfs/merged/dev",
+    ] {
+        // create the directories in case they don't exist on the image
+        let _ = mkdir(
+            dir,
+            Mode::S_IRWXU | Mode::S_IRWXG | Mode::S_IROTH | Mode::S_IXOTH,
+        );
+    }
+
+    mount(
+        Some("sysfs"),
+        "/container_tmpfs/merged/sys",
+        Some("sysfs"),
+        MOUNT_FLAGS,
+        None::<&str>,
+    )?;
+    mount(
+        Some("proc"),
+        "/container_tmpfs/merged/proc",
+        Some("proc"),
+        MOUNT_FLAGS,
+        None::<&str>,
+    )?;
+    mount(
+        Some("devtmpfs"),
+        "/container_tmpfs/merged/dev",
+        Some("devtmpfs"),
+        MOUNT_FLAGS - MsFlags::MS_NODEV,
+        None::<&str>,
+    )?;
+    let _ = mkdir(
+        "/container_tmpfs/merged/dev/shm",
+        Mode::S_IRWXU | Mode::S_IRWXG | Mode::S_IROTH | Mode::S_IXOTH,
+    );
+    mount(
+        Some("tmpfs"),
+        "/container_tmpfs/merged/dev/shm",
+        Some("tmpfs"),
+        MOUNT_FLAGS - MsFlags::MS_NODEV,
+        None::<&str>,
+    )?;
+
     let container_pid = {
         // 8MB
         let mut container_stack = Vec::<u8>::with_capacity(8 * 1024 * 1024);
@@ -413,6 +478,15 @@ fn main() -> Result<(), Error> {
         InitramfsQuery::ShuttingDown,
     )?;
 
+    if no_kill {
+        println!("Not killing because we are in 'debug mode'!");
+        // init must stay alive, or the kernel will die
+        loop {
+            sleep(5);
+        }
+    }
+
     unsafe { libc::reboot(libc::LINUX_REBOOT_CMD_POWER_OFF) };
+
     Ok(())
 }

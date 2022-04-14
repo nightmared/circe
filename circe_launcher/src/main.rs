@@ -1,7 +1,9 @@
 #![feature(path_try_exists)]
 
 use qapi::Qmp;
-use std::{os::unix::net::UnixStream, process::Command};
+use std::{
+    fmt::Formatter, net::SocketAddr, os::unix::net::UnixStream, process::Command, time::Duration,
+};
 use thiserror::Error;
 
 use circe_common::{
@@ -53,13 +55,16 @@ fn main() -> Result<(), Error> {
         path.to_string_lossy().to_string()
     };
 
-    // generate unique MAC addresses
-    let mut macaddr = String::from("66:60");
-    for octet in chall.container_ip.octets() {
-        macaddr.push_str(&format!(":{:02x}", octet));
-    }
+    let qmp_path = &format!("{}/qmp-{}", config.qmp_folder, chall.name);
 
-    let qmp_path = &format!("/var/run/circe/qmp-{}", chall.name);
+    let macaddr = {
+        let mut macaddr = String::new();
+        for octet in chall.mac_address {
+            macaddr.push_str(&format!("{:02x}:", octet));
+        }
+        macaddr.pop();
+        macaddr
+    };
 
     // delete stale socket files
     let _ = std::fs::remove_file(&qmp_path);
@@ -79,11 +84,12 @@ fn main() -> Result<(), Error> {
             &format!(
                 "earlyprintk=serial,ttyS0,115200 console=ttyS0,115200 norandmaps {}",
                 format!(
-                    "ip={}/{} port={} challenge={}",
+                    "ip={}/{} port={} challenge={} {}",
                     chall.container_ip,
                     config.network.prefix(),
                     config.listening_port,
-                    chall.name
+                    chall.name,
+                    if chall.debug_mode { "no_kill" } else { "" },
                 )
             ),
         ])
@@ -123,16 +129,25 @@ fn main() -> Result<(), Error> {
                 let serial_device = dev.filename.splitn(2, ':').skip(1).next();
                 if let Some(serial_device) = serial_device {
                     println!("The serial device is '{}'", serial_device);
-                    // notify the server of the serial device path
-                    perform_query_without_response(
-                        &config.get_server_address(),
-                        CirceQueryRaw::Challenge(ChallengeQuery {
-                            kind: ChallengeQueryKind::Client(ClientQuery::SetSerialTerminal(
-                                serial_device.to_string(),
-                            )),
-                            challenge_name: challenge_name.clone(),
-                        }),
-                    )?;
+                    let serial_device = serial_device.to_owned();
+                    std::thread::spawn(move || {
+                        loop {
+                            // notify the server of the serial device path
+                            if let Err(e) = perform_query_without_response(
+                                &SocketAddr::V4(config.get_server_address()),
+                                CirceQueryRaw::Challenge(ChallengeQuery {
+                                    kind: ChallengeQueryKind::Client(
+                                        ClientQuery::SetSerialTerminal(serial_device.to_string()),
+                                    ),
+                                    challenge_name: challenge_name.clone(),
+                                }),
+                            ) {
+                                println!("{:?}", e);
+                            }
+                            std::thread::sleep(Duration::new(5, 0));
+                        }
+                    });
+                    break;
                 }
             }
         }

@@ -1,34 +1,25 @@
 // The network part of this crate is "inspired" from https://raw.githubusercontent.com/mullvad/mullvadvpn-app/d92376b4d1df9b547930c68aa9bae9640ff2a022/talpid-core/src/firewall/linux.rs
 use std::fmt::Debug;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
+use std::path::Path;
 use std::time::SystemTime;
 
-use circe_common::load_config;
-use circe_common::AuthenticatedQuery;
-use circe_common::Challenge;
-use circe_common::ChallengeQuery;
-use circe_common::ChallengeQueryKind;
-use circe_common::CirceQuery;
-use circe_common::CirceQueryRaw;
-use circe_common::CirceResponse;
-use circe_common::CirceResponseError;
-use circe_common::ClientQuery;
-use circe_common::Config;
-use circe_common::ConfigError;
-use circe_common::DockerImageConfig;
-use circe_common::InitramfsQuery;
+use circe_common::{
+    load_config, AuthenticatedQuery, Challenge, ChallengeQuery, ChallengeQueryKind, CirceQuery,
+    CirceQueryRaw, CirceResponse, CirceResponseError, ClientQuery, Config, ConfigError,
+    DockerImageConfig, InitramfsQuery,
+};
+use nix::unistd::{chown, User};
 use once_cell::sync::OnceCell;
 use sha2::{Digest, Sha256};
 use tokio::fs::File;
-use tokio::io::AsyncReadExt;
-use tokio::io::AsyncWriteExt;
-use tokio::net::TcpListener;
-use tokio::net::TcpStream;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::RwLock;
 use tracing::error;
 
 mod network;
-use network::{setup_bridge, setup_nat};
+use network::{setup_interfaces, setup_nat};
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -64,12 +55,9 @@ pub enum ServerError {
 
     #[error("Error while performing a network operation")]
     NetworkError(#[from] std::io::Error),
-}
 
-fn setup_network(conf: &Config) -> Result<(), Error> {
-    setup_bridge(&conf)?;
-
-    setup_nat(&conf)
+    #[error("Internal error")]
+    InternalError(#[from] Error),
 }
 
 static GLOBAL_CONFIG: OnceCell<RwLock<Config>> = OnceCell::new();
@@ -104,9 +92,11 @@ async fn handle_challenge_query(
     match kind {
         ChallengeQueryKind::Initramfs(InitramfsQuery::ServiceAvailable) => {
             chall.last_seen_available = Some(SystemTime::now());
+            chall.running = true;
         }
         ChallengeQueryKind::Initramfs(InitramfsQuery::ShuttingDown) => {
             chall.last_seen_available = None;
+            chall.running = false;
             chall.serial_pts = None;
         }
         ChallengeQueryKind::Client(ClientQuery::RetrieveDockerConfig) => {
@@ -141,12 +131,15 @@ async fn handle_challenge_query(
             .await?;
             return Ok(());
         }
-        ChallengeQueryKind::Client(ClientQuery::SetSerialTerminal(term)) => {
-            println!(
-                "{} defined as the pts backend for container image {}",
-                term, challenge_name
-            );
-            chall.serial_pts = Some(term);
+        ChallengeQueryKind::Client(ClientQuery::SetSerialTerminal(ref term)) => {
+            chall.running = true;
+            if chall.serial_pts.as_ref() != Some(term) {
+                println!(
+                    "{} defined as the pts backend for container image {}",
+                    term, challenge_name
+                );
+                chall.serial_pts = Some(term.to_string());
+            }
         }
     }
 
@@ -192,7 +185,30 @@ async fn handle_query_raw(
                 .as_slice(),
             )
             .await?;
-            return Ok(());
+
+            Ok(())
+        }
+        CirceQueryRaw::ReloadConfig => {
+            println!("Configuration reloading asked!");
+
+            let new_conf = load_config().map_err(Error::from)?;
+            *GLOBAL_CONFIG
+                .get()
+                .expect("the global configuration is not initialized")
+                .write()
+                .await = new_conf;
+
+            let conf = GLOBAL_CONFIG
+                .get()
+                .expect("the global configuration is not initialized")
+                .read()
+                .await;
+            apply_config(&conf)?;
+
+            sock.write_all(serde_json::to_vec(&CirceResponse::<()>::Success)?.as_slice())
+                .await?;
+
+            Ok(())
         }
     }
 }
@@ -260,7 +276,17 @@ async fn handle_query_wrapper(mut sock: TcpStream, remote: SocketAddr) {
 
     sock.shutdown()
         .await
-        .expect("Could not shudtwon the connection");
+        .expect("Could not shutdown the connection");
+}
+
+fn apply_config(config: &Config) -> Result<(), Error> {
+    println!("Applying the network configuration");
+
+    setup_interfaces(config)?;
+
+    setup_nat(config)?;
+
+    Ok(())
 }
 
 #[tokio::main]
@@ -269,15 +295,26 @@ async fn main() -> Result<(), Error> {
     tracing_subscriber::fmt::init();
 
     let config = load_config()?;
+
+    let qmp_folder = Path::new(&config.qmp_folder);
+    if !qmp_folder.exists() {
+        std::fs::create_dir(qmp_folder).expect("Couldn't create the QMP folder");
+    }
+    chown(
+        qmp_folder,
+        Some(
+            User::from_name(&config.user)?
+                .expect("There should be a user with this name")
+                .uid,
+        ),
+        None,
+    )?;
+
     GLOBAL_CONFIG.set(RwLock::new(config.clone())).unwrap();
 
-    setup_network(&config)?;
+    apply_config(&config)?;
 
-    let listener = TcpListener::bind(&SocketAddr::from((
-        config.network.nth(1).unwrap(),
-        config.listening_port,
-    )))
-    .await?;
+    let listener = TcpListener::bind(&SocketAddr::V4(config.get_server_address())).await?;
 
     loop {
         if let Ok((socket, remote_addr)) = listener.accept().await {

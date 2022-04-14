@@ -1,6 +1,6 @@
 [submodule "deps/rustables"]
 	path = deps/rustables
-	url = git@gitlab.com:rustwall/rustables.git
+	url = https://gitlab.com/rustwall/rustables.git
 [submodule "deps/nasty_network_ioctls"]
 	path = deps/nasty_network_ioctls
 	url = git@github.com:nightmared/nasty_network_ioctls.git

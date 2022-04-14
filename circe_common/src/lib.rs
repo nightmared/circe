@@ -20,17 +20,25 @@ pub enum ConfigError {
     #[cfg(feature = "toml_support")]
     #[error("The configuration file couldn't be parsed")]
     ParseError(#[from] toml::de::Error),
+    #[error("Network too small")]
+    SmallNetwork,
+}
+
+fn default_qmp_folder() -> String {
+    String::from("/tmp")
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RawConfig {
     pub network: Ipv4Network,
-    pub bridge_name: String,
+    pub interface_name: String,
     pub listening_port: u16,
     pub user: String,
     pub src_folder: String,
     pub image_folder: String,
     pub symmetric_key: String,
+    #[serde(default = "default_qmp_folder")]
+    pub qmp_folder: String,
 
     pub challenges: Vec<RawChallenge>,
 }
@@ -40,26 +48,46 @@ fn default_memory_allocation() -> usize {
     1024
 }
 
+fn default_web_access_is_authorized() -> bool {
+    false
+}
+
+fn default_debug_mode() -> bool {
+    false
+}
+
+fn default_offset_directory() -> String {
+    return String::new();
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RawChallenge {
     pub name: String,
     pub source_port: u16,
     pub destination_port: u16,
     pub container_ip: Ipv4Addr,
+    // offset in the project folder to the directory that contains the Dockerfile
+    #[serde(default = "default_offset_directory")]
+    pub offset_directory: String,
     #[serde(rename = "memory_in_MB", default = "default_memory_allocation")]
     pub memory_allocation: usize,
+    #[serde(default = "default_debug_mode")]
+    pub debug_mode: bool,
     pub flag: String,
+    #[serde(default = "default_web_access_is_authorized")]
+    pub web_access: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub network: Ipv4Network,
-    pub bridge_name: String,
+    pub interface_name: String,
     pub listening_port: u16,
     pub user: String,
     pub src_folder: PathBuf,
     pub image_folder: PathBuf,
     pub symmetric_key: String,
+    pub qmp_folder: String,
 
     // name -> value
     pub challenges: HashMap<String, Challenge>,
@@ -70,18 +98,20 @@ impl From<RawConfig> for Config {
         let mut challs = HashMap::with_capacity(raw.challenges.len());
 
         for (pos, chall) in raw.challenges.into_iter().enumerate() {
-            let tap_name = format!("{}-tap{}", raw.bridge_name, pos);
+            let tap_name = format!("{}-tap{}", raw.interface_name, pos + 2);
             challs.insert(chall.name.clone(), Challenge::from_raw(chall, tap_name));
         }
 
         Config {
             network: raw.network,
-            bridge_name: raw.bridge_name,
+            interface_name: raw.interface_name,
             listening_port: raw.listening_port,
             user: raw.user,
             src_folder: PathBuf::from(raw.src_folder),
             image_folder: PathBuf::from(raw.image_folder),
             symmetric_key: raw.symmetric_key,
+            qmp_folder: raw.qmp_folder,
+
             challenges: challs,
         }
     }
@@ -89,11 +119,11 @@ impl From<RawConfig> for Config {
 
 #[cfg(feature = "net")]
 impl Config {
-    pub fn get_server_address(&self) -> SocketAddr {
-        SocketAddr::V4(SocketAddrV4::new(
-            self.network.nth(1).unwrap(),
+    pub fn get_server_address(&self) -> SocketAddrV4 {
+        SocketAddrV4::new(
+            self.network.nth(1).expect("NetworkTooSmall"),
             self.listening_port,
-        ))
+        )
     }
 }
 
@@ -105,28 +135,50 @@ pub struct Challenge {
     pub source_port: u16,
     pub destination_port: u16,
     pub container_ip: Ipv4Addr,
+    pub offset_directory: String,
+    pub mac_address: [u8; 6],
+    pub debug_mode: bool,
     pub memory_allocation: usize,
     pub flag: String,
     pub serial_pts: Option<String>,
+    pub running: bool,
     pub last_seen_available: Option<SystemTime>,
+    pub web_access: bool,
 }
 
 impl Challenge {
     fn from_raw(raw: RawChallenge, tap_name: String) -> Self {
+        // generate unique MAC addresses
+        let mut mac_address = [0u8; 6];
+        mac_address[0] = 0x66;
+        mac_address[1] = 0x60;
+        let ip = raw.container_ip.octets();
+        for i in 0..4 {
+            mac_address[2 + i] = ip[i];
+        }
+
         Challenge {
             name: raw.name,
             tap_name,
             source_port: raw.source_port,
             destination_port: raw.destination_port,
             container_ip: raw.container_ip,
+            offset_directory: raw.offset_directory,
+            debug_mode: raw.debug_mode,
+            mac_address,
             memory_allocation: raw.memory_allocation,
             flag: raw.flag,
             serial_pts: None,
+            running: false,
             last_seen_available: None,
+            web_access: raw.web_access,
         }
     }
 
     pub fn is_running(&self) -> bool {
+        if self.running == false {
+            return false;
+        }
         match self.last_seen_available {
             Some(time) => time > SystemTime::now() - Duration::new(60, 1),
             None => false,
@@ -156,20 +208,24 @@ pub fn load_config() -> Result<Config, ConfigError> {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct DockuerVolume {}
+pub struct DockerVolume {}
+
+fn default_work_dir() -> String {
+    String::from("/")
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct DockerImageConfig {
     #[serde(rename = "Cmd")]
-    pub cmd: Vec<String>,
+    pub cmd: Option<Vec<String>>,
     #[serde(rename = "Entrypoint")]
     pub entrypoint: Option<Vec<String>>,
     #[serde(rename = "Env")]
     pub env_variables: Vec<String>,
-    #[serde(rename = "WorkingDir")]
+    #[serde(rename = "WorkingDir", default = "default_work_dir")]
     pub work_directory: String,
     #[serde(rename = "Volumes")]
-    pub volumes: Option<HashMap<String, DockuerVolume>>,
+    pub volumes: Option<HashMap<String, DockerVolume>>,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -218,6 +274,7 @@ pub struct AuthenticatedQuery<T> {
 pub enum CirceQueryRaw {
     Challenge(ChallengeQuery),
     RetrieveChallengeList,
+    ReloadConfig,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -255,6 +312,8 @@ pub enum QueryError {
 #[cfg(feature = "net")]
 fn perform_raw_query(target_addr: &SocketAddr, val: &CirceQuery) -> Result<Vec<u8>, QueryError> {
     let mut stream = TcpStream::connect(target_addr)?;
+    stream.set_write_timeout(Some(Duration::new(5, 0)))?;
+    stream.set_read_timeout(Some(Duration::new(5, 0)))?;
     stream.write_all(serde_json::to_vec(val)?.as_slice())?;
     stream.shutdown(std::net::Shutdown::Write)?;
     let mut buf = Vec::new();
@@ -288,6 +347,25 @@ pub fn perform_query<T: for<'a> serde::Deserialize<'a>>(
     }
 }
 
+#[cfg(feature = "net")]
+pub fn perform_authenticated_query_without_response(
+    target_addr: &SocketAddr,
+    val: CirceQueryRaw,
+    auth_key: &str,
+) -> Result<(), QueryError> {
+    let response = perform_raw_query(
+        target_addr,
+        &CirceQuery::AuthenticatedQuery(AuthenticatedQuery {
+            wrapped_query: val,
+            auth_key: auth_key.to_string(),
+        }),
+    )?;
+    match serde_json::from_slice::<CirceResponse<()>>(&response)? {
+        CirceResponse::Success => return Ok(()),
+        CirceResponse::SuccessWithData(()) => return Err(QueryError::TooMuchDataError),
+        CirceResponse::Error(e) => return Err(QueryError::CirceError(e)),
+    }
+}
 #[cfg(feature = "net")]
 pub fn perform_authenticated_query<T: for<'a> serde::Deserialize<'a>>(
     target_addr: &SocketAddr,
